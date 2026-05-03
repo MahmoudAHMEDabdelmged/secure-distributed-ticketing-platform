@@ -15,7 +15,7 @@ values
     120
   );
 
-insert into public.events (id, venue_id, title, description, event_date, image_url, status)
+insert into public.events (id, venue_id, title, description, event_date, image_url, status, created_by)
 values
   (
     '33333333-3333-3333-3333-333333333333',
@@ -24,7 +24,8 @@ values
     'A sample published event for demonstrating secure seat reservation and ticket validation.',
     now() + interval '14 days',
     null,
-    'published'
+    'published',
+    null
   ),
   (
     '44444444-4444-4444-4444-444444444444',
@@ -33,7 +34,8 @@ values
     'A draft admin-managed workshop for testing unpublished event access rules.',
     now() + interval '21 days',
     null,
-    'draft'
+    'draft',
+    null
   );
 
 insert into public.event_seats (event_id, seat_label, section, price, status)
