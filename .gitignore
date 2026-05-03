@@ -43,3 +43,11 @@ next-env.d.ts
 .env.local
 
 .env.local
+
+node_modules/
+.next/
+.env.local
+.env
+.env*.local
+services/**/node_modules/
+services/**/.env
