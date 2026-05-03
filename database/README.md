@@ -1,3 +1,3 @@
 # Database
 
-This folder contains database-related project assets. Keep schema migrations, seed data, and visual diagrams here so database changes are documented alongside the application.
+This folder contains Neon PostgreSQL database assets for the distributed ticketing platform. Each service owns its own database and migration folder, so migrations are grouped under `auth-db`, `events-db`, `booking-db`, `payment-db`, and `ticket-db`.

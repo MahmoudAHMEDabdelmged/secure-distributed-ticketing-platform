@@ -7,7 +7,7 @@ A college project for building a secure event ticketing platform with distribute
 - Next.js
 - TypeScript
 - Tailwind CSS
-- Supabase
+- Neon PostgreSQL
 - Vercel
 - Optional Upstash Redis for distributed locking and reservation caching
 
@@ -18,7 +18,7 @@ A college project for building a secure event ticketing platform with distribute
 - Secure booking confirmation
 - Ticket generation and ticket validation concepts
 - Admin event and inventory management
-- Supabase-backed data storage and authentication
+- Neon-backed service databases
 - Distributed-system notes for reservation expiry, concurrency, and scaling
 
 ## Project Architecture Summary
@@ -30,7 +30,7 @@ The app keeps the existing root `app/` directory for Next.js routes and pages. S
 - `app/`: Existing Next.js app routes and UI entry points.
 - `src/components/`: Reusable UI components grouped by platform area.
 - `src/services/`: Application service modules for data and workflow operations.
-- `src/lib/`: Shared libraries for Supabase, booking logic, security, and utilities.
+- `src/lib/`: Shared libraries for Neon database access, booking logic, security, and utilities.
 - `src/types/`: Shared TypeScript type definitions.
 - `src/config/`: Centralized application configuration.
 - `database/`: Migrations, seed data, and database diagrams.
@@ -39,7 +39,7 @@ The app keeps the existing root `app/` directory for Next.js routes and pages. S
 
 ## Security Note
 
-Real secrets must never be committed to the repository. Use `.env.example` as a template, create a local `.env.local` for development, and keep production secrets in Supabase, Vercel, or the relevant deployment secret store.
+Real secrets must never be committed to the repository. Use `.env.example` as a template, create a local `.env.local` for development, and keep production secrets in Vercel or the relevant deployment secret store.
 
 ## Setup Steps
 
