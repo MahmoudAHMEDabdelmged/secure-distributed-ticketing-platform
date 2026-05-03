@@ -1,8 +1,10 @@
 # Database Design
 
-The project now uses a true distributed database-per-service architecture. Each service owns its own Supabase project/database, and no service directly queries or writes another service database.
+The project uses a true distributed database-per-service architecture hosted on Neon PostgreSQL. Each service owns its own independent Neon database, and no service directly queries or writes another service database.
 
-Services communicate through Vercel API routes and future events. IDs such as `user_id`, `event_id`, `seat_id`, and `reservation_id` are copied between services as UUID references, but they are not cross-database foreign keys.
+Services communicate through Next.js/Vercel API routes and future events. IDs such as `user_id`, `event_id`, `seat_id`, and `reservation_id` are copied between services as UUID references, but they are not cross-database foreign keys.
+
+Connection strings are stored only in local `.env.local` files or Vercel environment variables. They must never be committed. The frontend never connects directly to Neon; only server-side API routes and server-only modules may use database connection strings.
 
 ## Service Databases
 
@@ -22,7 +24,7 @@ Services communicate through Vercel API routes and future events. IDs such as `u
 - `role`: `user` or `admin`, enforced with a check constraint.
 - `created_at` and `updated_at`: Profile timestamps.
 
-RLS is enabled for `profiles`. Users can view their own profile and update their own `full_name`; admins can view all profiles and update user roles. Because admin role data lives in the same table, the Auth DB uses a `SECURITY DEFINER` helper function to avoid recursive RLS checks when determining whether the current user is an admin.
+Authorization is enforced in the Auth Service API layer. Users may view their own profile and update their own `full_name`; admins may view all profiles and update user roles.
 
 ## Events Database
 
@@ -37,7 +39,7 @@ Important constraints:
 - `event_seats` enforces `unique(event_id, seat_label)` so the same event cannot have duplicate seat labels.
 - Event and seat statuses use text check constraints instead of shared enum types so each database stays independent.
 
-RLS is enabled for `venues`, `events`, and `event_seats`. Authenticated users can read published events and their related seats and venues. Admin writes are checked with trusted admin claims in the JWT, while server-side service-role clients can perform trusted service operations.
+Authorization is enforced in the Events Service API layer. Authenticated users can read published events and their related seats and venues. Admin-only event management is handled by protected server-side routes.
 
 ## Booking Database
 
@@ -51,7 +53,7 @@ RLS is enabled for `venues`, `events`, and `event_seats`. Authenticated users ca
 
 There are no foreign keys to Auth or Events because those records live in separate databases. The Booking service must validate user, event, and seat data through APIs/events before creating reservations.
 
-RLS is enabled for `reservations`. Users can view their own reservations and create reservations only for their own `user_id`. Admins can view and update all reservations, and trusted service-role API code can perform service operations.
+Authorization is enforced in the Booking Service API layer. Users can view their own reservations and create reservations only for their own `user_id`; admin routes can view and update all reservations.
 
 ## Active Reservation Unique Index
 
@@ -67,7 +69,7 @@ This prevents two users from having active reservations for the same seat at the
 
 The Payment service should verify reservation details through the Booking API before accepting or updating a payment. This project uses `fake_transaction_reference` for demos and must not store real card details.
 
-RLS is enabled for `payments`. Users can view their own payments. Payment writes are reserved for admins or trusted service-role API code.
+Authorization is enforced in the Payment Service API layer. Users can view their own payments, while payment writes are performed by protected server-side routes.
 
 ## Ticket Database
 
@@ -75,7 +77,7 @@ RLS is enabled for `payments`. Users can view their own payments. Payment writes
 
 `ticket_code` is unique so each issued ticket has one validation code. Ticket creation should happen only after the Booking and Payment services confirm that a reservation is valid and paid.
 
-RLS is enabled for `tickets`. Users can view their own tickets. Admins and trusted service-role API code can view or update ticket records for validation and administration.
+Authorization is enforced in the Ticket Service API layer. Users can view their own tickets, while protected server-side routes manage ticket validation and administration updates.
 
 ## Cross-Service Consistency
 
@@ -88,4 +90,4 @@ Because there are no cross-database foreign keys, consistency is handled by serv
 
 This design avoids direct database coupling and keeps service ownership clear, which is the core idea of database-per-service architecture.
 
-Real secrets must not be stored in migrations, seed files, or documentation.
+Real secrets and real Neon connection strings must not be stored in migrations, seed files, or documentation.
