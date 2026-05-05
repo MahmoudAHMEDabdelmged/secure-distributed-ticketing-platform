@@ -192,6 +192,19 @@ function toSafeTicket(row) {
   };
 }
 
+function toPublicVerificationTicket(row) {
+  return {
+    id: row.id,
+    ticket_number: row.ticket_number,
+    event_title: row.event_title,
+    section_name: row.section_name,
+    status: row.status,
+    issued_at: row.issued_at,
+    used_at: row.used_at,
+    expires_at: row.expires_at
+  };
+}
+
 const ticketSelectSql = `
   select
     id,
@@ -550,19 +563,21 @@ app.get(
     if (ticket.status === "valid") {
       return res.json({
         status: "valid",
-        ticket: toSafeTicket(ticket)
+        ticket: toPublicVerificationTicket(ticket)
       });
     }
 
     if (ticket.status === "used") {
       return res.json({
         status: "used",
-        message: "Ticket already used"
+        message: "Ticket already used",
+        ticket: toPublicVerificationTicket(ticket)
       });
     }
 
     return res.json({
-      status: ticket.status
+      status: ticket.status,
+      ticket: toPublicVerificationTicket(ticket)
     });
   })
 );
