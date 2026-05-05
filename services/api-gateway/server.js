@@ -12,6 +12,7 @@ const PORT = process.env.PORT || 4000;
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
 const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || "http://localhost:5000";
 const EVENTS_SERVICE_URL = process.env.EVENTS_SERVICE_URL || "http://localhost:5001";
+const BOOKING_SERVICE_URL = process.env.BOOKING_SERVICE_URL || "http://localhost:5002";
 
 const requestCounts = new Map();
 
@@ -52,7 +53,9 @@ function isPublicRoute(req) {
     "/auth/register",
     "/auth/login",
     "/events-service/health",
-    "/events-service/health/deep"
+    "/events-service/health/deep",
+    "/booking-service/health",
+    "/booking-service/health/deep"
   ];
 
   if (publicRoutes.includes(req.path)) {
@@ -69,6 +72,14 @@ function isPublicRoute(req) {
 
   // TODO: Protect these write routes with organizer/admin authorization in the admin flow phase.
   if ((req.method === "POST") && (req.path === "/events" || req.path === "/venues")) {
+    return true;
+  }
+
+  // TODO: Derive user_id from JWT and protect booking routes in the admin/user flow phase.
+  if (
+    matchesRoutePrefix(req.path, "/bookings") ||
+    matchesUserBookingsRoute(req.path)
+  ) {
     return true;
   }
 
@@ -122,8 +133,33 @@ function eventsServiceUnavailable(error, req, res) {
   );
 }
 
+function bookingServiceUnavailable(error, req, res) {
+  console.error("Booking Service proxy error:", {
+    message: error.message,
+    code: error.code,
+    path: req.originalUrl
+  });
+
+  if (!res.headersSent) {
+    res.writeHead(502, {
+      "Content-Type": "application/json"
+    });
+  }
+
+  res.end(
+    JSON.stringify({
+      message: "Booking Service unavailable",
+      service: "api-gateway"
+    })
+  );
+}
+
 function matchesRoutePrefix(path, prefix) {
   return path === prefix || path.startsWith(`${prefix}/`);
+}
+
+function matchesUserBookingsRoute(path) {
+  return /^\/users\/[^/]+\/bookings\/?$/.test(path);
 }
 
 app.use(rateLimiter);
@@ -187,6 +223,42 @@ app.use(
     changeOrigin: true,
     on: {
       error: eventsServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/booking-service"),
+    target: BOOKING_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/booking-service": ""
+    },
+    on: {
+      error: bookingServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/bookings"),
+    target: BOOKING_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: bookingServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesUserBookingsRoute(path),
+    target: BOOKING_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: bookingServiceUnavailable
     }
   })
 );
