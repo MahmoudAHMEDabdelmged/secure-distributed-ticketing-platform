@@ -369,12 +369,6 @@ app.post(
       throw createEventsServiceUnavailableError();
     }
 
-    const totalPriceCents = quantity * unitPriceCents;
-
-    if (!Number.isSafeInteger(totalPriceCents) || totalPriceCents > 2147483647) {
-      throw new ApiError(400, "total_price_cents is too large");
-    }
-
     const [lockKeyOne, lockKeyTwo] = advisoryLockKeysFromUuid(section_id);
     const client = await pool.connect();
     let transactionStarted = false;
@@ -402,6 +396,12 @@ app.post(
           message: "Not enough seats available",
           available
         });
+      }
+
+      const totalPriceCents = quantity * unitPriceCents;
+
+      if (!Number.isSafeInteger(totalPriceCents) || totalPriceCents > 2147483647) {
+        throw new ApiError(400, "total_price_cents is too large");
       }
 
       const bookingResult = await runClientQuery(
@@ -546,15 +546,25 @@ app.post(
     }
 
     const updatedResult = await query(
-      `with updated_booking as (
-         update public.bookings
-         set status = 'cancelled'
-         where id = $1
-         returning id
-       )
-       ${bookingSelectSql}
-       where id = (select id from updated_booking)
-       limit 1`,
+      `update public.bookings
+       set status = 'cancelled'
+       where id = $1
+       returning
+         id,
+         user_id,
+         user_email,
+         event_id,
+         section_id,
+         event_title,
+         section_name,
+         quantity,
+         unit_price_cents,
+         total_price_cents,
+         currency,
+         status,
+         expires_at,
+         created_at,
+         updated_at`,
       [req.params.id]
     );
 
