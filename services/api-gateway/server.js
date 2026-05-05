@@ -11,6 +11,7 @@ app.use(cors());
 const PORT = process.env.PORT || 4000;
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
 const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || "http://localhost:5000";
+const EVENTS_SERVICE_URL = process.env.EVENTS_SERVICE_URL || "http://localhost:5001";
 
 const requestCounts = new Map();
 
@@ -44,15 +45,38 @@ function rateLimiter(req, res, next) {
   next();
 }
 
-function verifyToken(req, res, next) {
+function isPublicRoute(req) {
   const publicRoutes = [
     "/health",
     "/auth/health",
     "/auth/register",
-    "/auth/login"
+    "/auth/login",
+    "/events-service/health",
+    "/events-service/health/deep"
   ];
 
   if (publicRoutes.includes(req.path)) {
+    return true;
+  }
+
+  if (req.method === "GET" && (req.path === "/events" || req.path.startsWith("/events/"))) {
+    return true;
+  }
+
+  if (req.method === "GET" && req.path === "/venues") {
+    return true;
+  }
+
+  // TODO: Protect these write routes with organizer/admin authorization in the admin flow phase.
+  if ((req.method === "POST") && (req.path === "/events" || req.path === "/venues")) {
+    return true;
+  }
+
+  return false;
+}
+
+function verifyToken(req, res, next) {
+  if (isPublicRoute(req)) {
     return next();
   }
 
@@ -75,6 +99,31 @@ function verifyToken(req, res, next) {
       error: "Invalid or expired token"
     });
   }
+}
+
+function eventsServiceUnavailable(error, req, res) {
+  console.error("Events Service proxy error:", {
+    message: error.message,
+    code: error.code,
+    path: req.originalUrl
+  });
+
+  if (!res.headersSent) {
+    res.writeHead(502, {
+      "Content-Type": "application/json"
+    });
+  }
+
+  res.end(
+    JSON.stringify({
+      message: "Events Service unavailable",
+      service: "api-gateway"
+    })
+  );
+}
+
+function matchesRoutePrefix(path, prefix) {
+  return path === prefix || path.startsWith(`${prefix}/`);
 }
 
 app.use(rateLimiter);
@@ -102,6 +151,42 @@ app.use(
     changeOrigin: true,
     pathRewrite: {
       "^/auth": ""
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/events-service"),
+    target: EVENTS_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/events-service": ""
+    },
+    on: {
+      error: eventsServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/events"),
+    target: EVENTS_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: eventsServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/venues"),
+    target: EVENTS_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: eventsServiceUnavailable
     }
   })
 );
