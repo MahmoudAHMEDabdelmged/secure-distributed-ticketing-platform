@@ -13,6 +13,7 @@ const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
 const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || "http://localhost:5000";
 const EVENTS_SERVICE_URL = process.env.EVENTS_SERVICE_URL || "http://localhost:5001";
 const BOOKING_SERVICE_URL = process.env.BOOKING_SERVICE_URL || "http://localhost:5002";
+const TICKET_SERVICE_URL = process.env.TICKET_SERVICE_URL || "http://localhost:5003";
 
 const requestCounts = new Map();
 
@@ -55,7 +56,9 @@ function isPublicRoute(req) {
     "/events-service/health",
     "/events-service/health/deep",
     "/booking-service/health",
-    "/booking-service/health/deep"
+    "/booking-service/health/deep",
+    "/ticket-service/health",
+    "/ticket-service/health/deep"
   ];
 
   if (publicRoutes.includes(req.path)) {
@@ -79,6 +82,16 @@ function isPublicRoute(req) {
   if (
     matchesRoutePrefix(req.path, "/bookings") ||
     matchesUserBookingsRoute(req.path)
+  ) {
+    return true;
+  }
+
+  // TODO: Protect ticket issuance and ticket state changes with user/admin authorization.
+  if (
+    matchesRoutePrefix(req.path, "/tickets") ||
+    matchesBookingTicketsRoute(req.path) ||
+    matchesUserTicketsRoute(req.path) ||
+    matchesRoutePrefix(req.path, "/verify-ticket")
   ) {
     return true;
   }
@@ -154,12 +167,47 @@ function bookingServiceUnavailable(error, req, res) {
   );
 }
 
+function ticketServiceUnavailable(error, req, res) {
+  console.error("Ticket Service proxy error:", {
+    message: error.message,
+    code: error.code,
+    path: sanitizeGatewayPath(req.originalUrl)
+  });
+
+  if (!res.headersSent) {
+    res.writeHead(502, {
+      "Content-Type": "application/json"
+    });
+  }
+
+  res.end(
+    JSON.stringify({
+      message: "Ticket Service unavailable",
+      service: "api-gateway"
+    })
+  );
+}
+
+function sanitizeGatewayPath(path) {
+  return String(path)
+    .replace(/\/verify-ticket\/[^/?#]+/g, "/verify-ticket/[token]")
+    .replace(/\/tickets\/verify\/[^/?#]+/g, "/tickets/verify/[token]");
+}
+
 function matchesRoutePrefix(path, prefix) {
   return path === prefix || path.startsWith(`${prefix}/`);
 }
 
 function matchesUserBookingsRoute(path) {
   return /^\/users\/[^/]+\/bookings\/?$/.test(path);
+}
+
+function matchesBookingTicketsRoute(path) {
+  return /^\/bookings\/[^/]+\/tickets\/?$/.test(path);
+}
+
+function matchesUserTicketsRoute(path) {
+  return /^\/users\/[^/]+\/tickets\/?$/.test(path);
 }
 
 app.use(rateLimiter);
@@ -243,6 +291,45 @@ app.use(
 
 app.use(
   createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/ticket-service"),
+    target: TICKET_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/ticket-service": ""
+    },
+    on: {
+      error: ticketServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/verify-ticket"),
+    target: TICKET_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/verify-ticket": "/tickets/verify"
+    },
+    on: {
+      error: ticketServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesBookingTicketsRoute(path),
+    target: TICKET_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: ticketServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
     pathFilter: (path) => matchesRoutePrefix(path, "/bookings"),
     target: BOOKING_SERVICE_URL,
     changeOrigin: true,
@@ -259,6 +346,28 @@ app.use(
     changeOrigin: true,
     on: {
       error: bookingServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesUserTicketsRoute(path),
+    target: TICKET_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: ticketServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/tickets"),
+    target: TICKET_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: ticketServiceUnavailable
     }
   })
 );
