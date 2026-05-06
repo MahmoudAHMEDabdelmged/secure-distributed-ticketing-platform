@@ -10,6 +10,10 @@ const { pool, query, checkDatabaseConnection, checkDatabaseSchema } = require(".
 const app = express();
 const PORT = process.env.PORT || 5003;
 const BOOKING_SERVICE_URL = (process.env.BOOKING_SERVICE_URL || "http://localhost:5002").replace(/\/+$/, "");
+const PAYMENT_SERVICE_URL = (process.env.PAYMENT_SERVICE_URL || "http://localhost:5004").replace(/\/+$/, "");
+const REQUIRE_PAYMENT_FOR_TICKETS = !["false", "0", "no"].includes(
+  String(process.env.REQUIRE_PAYMENT_FOR_TICKETS || "true").trim().toLowerCase()
+);
 const VERIFY_BASE_URL = (process.env.VERIFY_BASE_URL || "http://localhost:4000/verify-ticket").replace(/\/+$/, "");
 const TICKET_SIGNING_SECRET = process.env.TICKET_SIGNING_SECRET;
 
@@ -233,6 +237,13 @@ function createBookingServiceUnavailableError() {
   });
 }
 
+function createPaymentServiceUnavailableError() {
+  return new ApiError(503, "Payment Service unavailable, tickets cannot be issued now", {
+    message: "Payment Service unavailable, tickets cannot be issued now",
+    service: "ticket-service"
+  });
+}
+
 async function fetchWithTimeout(url, options = {}) {
   if (typeof fetch !== "function") {
     throw new Error("Global fetch is not available in this Node.js runtime");
@@ -279,6 +290,35 @@ async function checkBookingServiceHealth() {
   }
 }
 
+async function checkPaymentServiceHealth() {
+  const startedAt = Date.now();
+
+  try {
+    const response = await fetchWithTimeout(`${PAYMENT_SERVICE_URL}/health`, {
+      headers: {
+        accept: "application/json"
+      },
+      timeoutMs: 3000
+    });
+
+    return {
+      status: response.ok ? "up" : "down",
+      statusCode: response.status,
+      latencyMs: Date.now() - startedAt,
+      required: REQUIRE_PAYMENT_FOR_TICKETS
+    };
+  } catch (error) {
+    logDependencyError("Payment Service", error);
+
+    return {
+      status: "down",
+      latencyMs: Date.now() - startedAt,
+      required: REQUIRE_PAYMENT_FOR_TICKETS,
+      error: error.name === "AbortError" ? "Payment Service health check timed out" : error.message
+    };
+  }
+}
+
 async function fetchBooking(bookingId) {
   let response;
 
@@ -313,6 +353,39 @@ async function fetchBooking(bookingId) {
   } catch (error) {
     logDependencyError("Booking Service response parsing", error);
     throw createBookingServiceUnavailableError();
+  }
+}
+
+async function fetchPaymentStatus(bookingId) {
+  let response;
+
+  try {
+    response = await fetchWithTimeout(`${PAYMENT_SERVICE_URL}/payments/booking/${encodeURIComponent(bookingId)}/status`, {
+      headers: {
+        accept: "application/json"
+      },
+      timeoutMs: 5000
+    });
+  } catch (error) {
+    logDependencyError("Payment Service", error);
+    throw createPaymentServiceUnavailableError();
+  }
+
+  if (!response.ok) {
+    throw createPaymentServiceUnavailableError();
+  }
+
+  try {
+    const payload = await response.json();
+
+    if (!payload || typeof payload.is_paid !== "boolean" || typeof payload.status !== "string") {
+      throw new Error("Payment Service response did not include payment status data");
+    }
+
+    return payload;
+  } catch (error) {
+    logDependencyError("Payment Service response parsing", error);
+    throw createPaymentServiceUnavailableError();
   }
 }
 
@@ -370,17 +443,26 @@ app.get(
     }
 
     const bookingService = await checkBookingServiceHealth();
+    const paymentService = REQUIRE_PAYMENT_FOR_TICKETS
+      ? await checkPaymentServiceHealth()
+      : {
+          status: "not_required",
+          required: false
+        };
     const isHealthy =
       database.status === "up" &&
       database.schema &&
       database.schema.status === "ready" &&
-      bookingService.status === "up";
+      bookingService.status === "up" &&
+      (!REQUIRE_PAYMENT_FOR_TICKETS || paymentService.status === "up");
 
     return res.status(isHealthy ? 200 : 503).json({
       service: "ticket-service",
       status: isHealthy ? "healthy" : "degraded",
       database,
       bookingService,
+      paymentService,
+      requirePaymentForTickets: REQUIRE_PAYMENT_FOR_TICKETS,
       timestamp: new Date().toISOString()
     });
   })
@@ -397,6 +479,20 @@ app.post(
 
     if (closedBookingStatuses.includes(booking.status)) {
       throw new ApiError(409, "Cannot issue tickets for cancelled or expired booking");
+    }
+
+    if (REQUIRE_PAYMENT_FOR_TICKETS) {
+      const paymentStatus = await fetchPaymentStatus(booking_id);
+
+      if (paymentStatus.is_paid !== true) {
+        const status = paymentStatus.status || "unpaid";
+
+        throw new ApiError(status === "suspicious" ? 409 : 402, "Payment is required before issuing tickets", {
+          message: "Payment is required before issuing tickets",
+          payment_status: status,
+          is_suspicious: paymentStatus.is_suspicious === true
+        });
+      }
     }
 
     if (!Number.isInteger(booking.quantity) || booking.quantity <= 0) {
