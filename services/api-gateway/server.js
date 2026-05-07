@@ -81,6 +81,10 @@ function isPublicRoute(req) {
     return true;
   }
 
+  if (matchesEventGateCodeRoute(req.path)) {
+    return true;
+  }
+
   if (req.method === "GET" && req.path === "/venues") {
     return true;
   }
@@ -105,6 +109,11 @@ function isPublicRoute(req) {
     matchesUserTicketsRoute(req.path) ||
     matchesRoutePrefix(req.path, "/verify-ticket")
   ) {
+    return true;
+  }
+
+  // Staff governance services enforce role/status checks until gateway RBAC is introduced.
+  if (matchesRoutePrefix(req.path, "/staff") || matchesInternalUserAccessRoute(req.path)) {
     return true;
   }
 
@@ -338,6 +347,14 @@ function matchesUserTicketsRoute(path) {
   return /^\/users\/[^/]+\/tickets\/?$/.test(path);
 }
 
+function matchesInternalUserAccessRoute(path) {
+  return /^\/internal\/users\/[^/]+\/access\/?$/.test(path);
+}
+
+function matchesEventGateCodeRoute(path) {
+  return /^\/events\/[^/]+\/gate-code\/(rotate|validate|status)\/?$/.test(path);
+}
+
 app.use(rateLimiter);
 app.use(verifyToken);
 
@@ -364,6 +381,22 @@ app.use(
     pathRewrite: {
       "^/auth": ""
     }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/staff"),
+    target: AUTH_SERVICE_URL,
+    changeOrigin: true
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesInternalUserAccessRoute(path),
+    target: AUTH_SERVICE_URL,
+    changeOrigin: true
   })
 );
 
@@ -494,6 +527,17 @@ app.use(
     changeOrigin: true,
     on: {
       error: sagaServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => path === "/tickets/gate/verify-use",
+    target: TICKET_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: ticketServiceUnavailable
     }
   })
 );

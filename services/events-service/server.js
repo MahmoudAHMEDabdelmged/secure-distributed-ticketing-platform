@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
@@ -6,8 +7,12 @@ const { pool, query, checkDatabaseConnection, checkRequiredSchema } = require(".
 
 const app = express();
 const PORT = process.env.PORT || 5001;
+const AUTH_SERVICE_URL = (process.env.AUTH_SERVICE_URL || "http://localhost:5000").replace(/\/+$/, "");
+const AUDIT_SERVICE_URL = (process.env.AUDIT_SERVICE_URL || "http://localhost:5006").replace(/\/+$/, "");
+const EVENT_GATE_CODE_SECRET = process.env.EVENT_GATE_CODE_SECRET || "";
 
 const allowedStatuses = ["draft", "published", "cancelled", "completed"];
+const allowedGateCodeRotatorRoles = ["admin", "security_staff", "security_leader"];
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 class ApiError extends Error {
@@ -79,6 +84,67 @@ async function runClientQuery(client, text, params) {
   }
 }
 
+async function fetchWithTimeout(url, options = {}) {
+  if (typeof fetch !== "function") {
+    throw new Error("Global fetch is not available in this Node.js runtime");
+  }
+
+  const timeoutMs = options.timeoutMs || 3000;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function auditSecurityEvent(eventType, options = {}) {
+  try {
+    const response = await fetchWithTimeout(`${AUDIT_SERVICE_URL}/audit/logs`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json"
+      },
+      body: JSON.stringify({
+        event_type: eventType,
+        service_name: "events-service",
+        severity: options.severity || "info",
+        actor_user_id: options.actor_user_id || null,
+        actor_role: options.actor_role || null,
+        action: options.action || eventType,
+        resource_type: options.resource_type || null,
+        resource_id: options.resource_id || null,
+        endpoint: options.endpoint || null,
+        method: options.method || null,
+        status: options.status || null,
+        status_code: options.status_code || null,
+        is_suspicious: options.is_suspicious === true,
+        suspicious_reason: options.suspicious_reason || null,
+        metadata: options.metadata || {}
+      }),
+      timeoutMs: 3000
+    });
+
+    if (!response.ok) {
+      console.warn("Audit logging failed for events-service event:", {
+        event_type: eventType,
+        status_code: response.status
+      });
+    }
+  } catch (error) {
+    console.warn("Audit service unavailable for events-service event:", {
+      event_type: eventType,
+      message: error.name === "AbortError" ? "Audit request timed out" : error.message
+    });
+  }
+}
+
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -103,6 +169,12 @@ function assertUuid(value, fieldName) {
   }
 }
 
+function assertRequiredUuid(value, fieldName) {
+  if (typeof value !== "string" || !uuidPattern.test(value)) {
+    throw new ApiError(400, `${fieldName} must be a valid UUID`);
+  }
+}
+
 function parseDate(value, fieldName) {
   if (!isNonEmptyString(value)) {
     throw new ApiError(400, `${fieldName} is required`);
@@ -115,6 +187,96 @@ function parseDate(value, fieldName) {
   }
 
   return date;
+}
+
+function parseOptionalDate(value, fieldName) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  if (typeof value !== "string") {
+    throw new ApiError(400, `${fieldName} must be a valid date`);
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    throw new ApiError(400, `${fieldName} must be a valid date`);
+  }
+
+  return date;
+}
+
+function normalizeMetadata(value) {
+  if (value === undefined || value === null) {
+    return {};
+  }
+
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new ApiError(400, "metadata must be an object");
+  }
+
+  return value;
+}
+
+function normalizeGateCode(value) {
+  if (!isNonEmptyString(value)) {
+    throw new ApiError(400, "code is required");
+  }
+
+  const code = value.trim();
+
+  if (code.length < 6 || code.length > 200) {
+    throw new ApiError(400, "code must be between 6 and 200 characters");
+  }
+
+  return code;
+}
+
+function hashGateCode(code) {
+  if (EVENT_GATE_CODE_SECRET) {
+    return crypto.createHmac("sha256", EVENT_GATE_CODE_SECRET).update(code).digest("hex");
+  }
+
+  return crypto.createHash("sha256").update(code).digest("hex");
+}
+
+function createCodeHint(code) {
+  return code.slice(-4);
+}
+
+async function fetchUserAccess(userId) {
+  let response;
+
+  try {
+    response = await fetchWithTimeout(`${AUTH_SERVICE_URL}/internal/users/${encodeURIComponent(userId)}/access`, {
+      headers: {
+        accept: "application/json"
+      },
+      timeoutMs: 3000
+    });
+  } catch (error) {
+    console.error("Auth Service access check failed:", {
+      message: error.name === "AbortError" ? "Auth Service request timed out" : error.message
+    });
+    throw new ApiError(503, "Auth Service unavailable, gate code rotation cannot be authorized now");
+  }
+
+  if (response.status === 404) {
+    throw new ApiError(403, "Rotating user is not authorized");
+  }
+
+  if (!response.ok) {
+    throw new ApiError(503, "Auth Service unavailable, gate code rotation cannot be authorized now");
+  }
+
+  const payload = await response.json();
+
+  if (!payload || typeof payload.role !== "string" || typeof payload.staff_status !== "string") {
+    throw new ApiError(503, "Auth Service returned an invalid access response");
+  }
+
+  return payload;
 }
 
 function parseIntegerQuery(value, fieldName, defaultValue, options = {}) {
@@ -556,6 +718,262 @@ app.post(
     } finally {
       client.release();
     }
+  })
+);
+
+app.post(
+  "/events/:eventId/gate-code/rotate",
+  asyncHandler(async (req, res) => {
+    assertRequiredUuid(req.params.eventId, "eventId");
+    assertRequiredUuid(req.body.rotated_by_user_id, "rotated_by_user_id");
+
+    const event = await fetchEventById(req.params.eventId);
+
+    if (!event) {
+      throw new ApiError(404, "Event not found");
+    }
+
+    const access = await fetchUserAccess(req.body.rotated_by_user_id);
+
+    if (
+      access.staff_status !== "active" ||
+      !access.is_active_staff ||
+      !allowedGateCodeRotatorRoles.includes(access.role)
+    ) {
+      await auditSecurityEvent("EVENT_GATE_CODE_ROTATED", {
+        severity: "high",
+        actor_user_id: req.body.rotated_by_user_id,
+        actor_role: access.role,
+        action: "Unauthorized event gate code rotation attempt",
+        resource_type: "event",
+        resource_id: req.params.eventId,
+        endpoint: "/events/:eventId/gate-code/rotate",
+        method: "POST",
+        status: "denied",
+        status_code: 403,
+        is_suspicious: true,
+        suspicious_reason: "User does not have an authorized gate code rotation role"
+      });
+
+      throw new ApiError(403, "Only active admin or security staff can rotate event gate codes");
+    }
+
+    const code = normalizeGateCode(req.body.code);
+    const expiresAt = parseOptionalDate(req.body.expires_at, "expires_at");
+
+    if (expiresAt && expiresAt <= new Date()) {
+      throw new ApiError(400, "expires_at must be in the future");
+    }
+
+    const metadata = normalizeMetadata(req.body.metadata);
+    const codeHash = hashGateCode(code);
+    const codeHint = createCodeHint(code);
+    const client = await pool.connect();
+    let rotatedCode;
+
+    try {
+      await runClientQuery(client, "begin");
+
+      await runClientQuery(
+        client,
+        `update public.event_gate_access_codes
+         set status = 'revoked',
+             revoked_at = now()
+         where event_id = $1
+         and status = 'active'`,
+        [req.params.eventId]
+      );
+
+      const result = await runClientQuery(
+        client,
+        `insert into public.event_gate_access_codes (
+           event_id,
+           code_hash,
+           code_hint,
+           rotated_by_user_id,
+           status,
+           metadata,
+           expires_at
+         )
+         values ($1, $2, $3, $4, 'active', $5::jsonb, $6)
+         returning id, event_id, code_hint, rotated_by_user_id, status, metadata, created_at, expires_at, revoked_at`,
+        [
+          req.params.eventId,
+          codeHash,
+          codeHint,
+          req.body.rotated_by_user_id,
+          JSON.stringify(metadata),
+          expiresAt ? expiresAt.toISOString() : null
+        ]
+      );
+
+      rotatedCode = result.rows[0];
+      await runClientQuery(client, "commit");
+    } catch (error) {
+      await runClientQuery(client, "rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    await auditSecurityEvent("EVENT_GATE_CODE_ROTATED", {
+      actor_user_id: req.body.rotated_by_user_id,
+      actor_role: access.role,
+      action: "Event gate access code rotated",
+      resource_type: "event",
+      resource_id: req.params.eventId,
+      endpoint: "/events/:eventId/gate-code/rotate",
+      method: "POST",
+      status: "active",
+      status_code: 201,
+      metadata: {
+        gate_code_id: rotatedCode.id,
+        code_hint: rotatedCode.code_hint,
+        expires_at: rotatedCode.expires_at
+      }
+    });
+
+    return res.status(201).json({
+      data: {
+        id: rotatedCode.id,
+        event_id: rotatedCode.event_id,
+        code_hint: rotatedCode.code_hint,
+        status: rotatedCode.status,
+        expires_at: rotatedCode.expires_at,
+        created_at: rotatedCode.created_at
+      }
+    });
+  })
+);
+
+app.post(
+  "/events/:eventId/gate-code/validate",
+  asyncHandler(async (req, res) => {
+    assertRequiredUuid(req.params.eventId, "eventId");
+
+    const event = await fetchEventById(req.params.eventId);
+
+    if (!event) {
+      throw new ApiError(404, "Event not found");
+    }
+
+    let code;
+
+    try {
+      code = normalizeGateCode(req.body.code);
+    } catch (error) {
+      await auditSecurityEvent("EVENT_GATE_CODE_VALIDATE_FAILED", {
+        severity: "medium",
+        action: "Event gate access code validation failed",
+        resource_type: "event",
+        resource_id: req.params.eventId,
+        endpoint: "/events/:eventId/gate-code/validate",
+        method: "POST",
+        status: "failed",
+        status_code: error.statusCode || 400,
+        metadata: {
+          reason: "invalid_code_format"
+        }
+      });
+
+      throw error;
+    }
+
+    const codeHash = hashGateCode(code);
+    const result = await query(
+      `select id, event_id, status, expires_at
+       from public.event_gate_access_codes
+       where event_id = $1
+       and status = 'active'
+       and (expires_at is null or expires_at > now())
+       and code_hash = $2
+       order by created_at desc
+       limit 1`,
+      [req.params.eventId, codeHash]
+    );
+
+    if (result.rowCount === 0) {
+      await auditSecurityEvent("EVENT_GATE_CODE_VALIDATE_FAILED", {
+        severity: "medium",
+        action: "Event gate access code validation failed",
+        resource_type: "event",
+        resource_id: req.params.eventId,
+        endpoint: "/events/:eventId/gate-code/validate",
+        method: "POST",
+        status: "failed",
+        status_code: 200,
+        metadata: {
+          reason: "code_mismatch_or_expired"
+        }
+      });
+
+      return res.json({
+        valid: false,
+        event_id: req.params.eventId,
+        status: "invalid"
+      });
+    }
+
+    await auditSecurityEvent("EVENT_GATE_CODE_VALIDATE_SUCCESS", {
+      action: "Event gate access code validation succeeded",
+      resource_type: "event",
+      resource_id: req.params.eventId,
+      endpoint: "/events/:eventId/gate-code/validate",
+      method: "POST",
+      status: "active",
+      status_code: 200,
+      metadata: {
+        gate_code_id: result.rows[0].id
+      }
+    });
+
+    return res.json({
+      valid: true,
+      event_id: result.rows[0].event_id,
+      status: result.rows[0].status
+    });
+  })
+);
+
+app.get(
+  "/events/:eventId/gate-code/status",
+  asyncHandler(async (req, res) => {
+    assertRequiredUuid(req.params.eventId, "eventId");
+
+    const event = await fetchEventById(req.params.eventId);
+
+    if (!event) {
+      throw new ApiError(404, "Event not found");
+    }
+
+    const result = await query(
+      `select id, event_id, code_hint, status, expires_at, created_at
+       from public.event_gate_access_codes
+       where event_id = $1
+       and status = 'active'
+       and (expires_at is null or expires_at > now())
+       order by created_at desc
+       limit 1`,
+      [req.params.eventId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.json({
+        event_id: req.params.eventId,
+        active: false,
+        code_hint: null,
+        expires_at: null
+      });
+    }
+
+    const activeCode = result.rows[0];
+
+    return res.json({
+      event_id: activeCode.event_id,
+      active: true,
+      code_hint: activeCode.code_hint,
+      expires_at: activeCode.expires_at
+    });
   })
 );
 
