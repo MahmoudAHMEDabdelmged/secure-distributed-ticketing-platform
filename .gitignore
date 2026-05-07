@@ -2,6 +2,7 @@
 
 # dependencies
 /node_modules
+**/node_modules/
 /.pnp
 .pnp.*
 .yarn/*
@@ -33,6 +34,7 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 !services/payment-service/.env.example
+!services/notification-service/.env.example
 
 # vercel
 .vercel
@@ -49,6 +51,7 @@ node_modules/
 .next/
 .env.local
 .env
+**/.env
 .env*.local
 services/**/node_modules/
 services/**/.env
