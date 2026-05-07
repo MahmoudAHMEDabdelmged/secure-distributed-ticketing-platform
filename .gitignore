@@ -33,6 +33,7 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 !services/payment-service/.env.example
+!services/notification-service/.env.example
 
 # vercel
 .vercel

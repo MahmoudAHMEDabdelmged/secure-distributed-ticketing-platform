@@ -15,6 +15,7 @@ const EVENTS_SERVICE_URL = process.env.EVENTS_SERVICE_URL || "http://localhost:5
 const BOOKING_SERVICE_URL = process.env.BOOKING_SERVICE_URL || "http://localhost:5002";
 const TICKET_SERVICE_URL = process.env.TICKET_SERVICE_URL || "http://localhost:5003";
 const PAYMENT_SERVICE_URL = process.env.PAYMENT_SERVICE_URL || "http://localhost:5004";
+const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || "http://localhost:5005";
 
 const requestCounts = new Map();
 
@@ -61,7 +62,9 @@ function isPublicRoute(req) {
     "/ticket-service/health",
     "/ticket-service/health/deep",
     "/payment-service/health",
-    "/payment-service/health/deep"
+    "/payment-service/health/deep",
+    "/notification-service/health",
+    "/notification-service/health/deep"
   ];
 
   if (publicRoutes.includes(req.path)) {
@@ -101,6 +104,11 @@ function isPublicRoute(req) {
 
   // TODO: Protect payment routes with user/admin authorization in the frontend auth flow phase.
   if (matchesRoutePrefix(req.path, "/payments") || matchesBookingPaymentsRoute(req.path)) {
+    return true;
+  }
+
+  // TODO: Protect notification routes with user/admin authorization in the frontend auth flow phase.
+  if (matchesRoutePrefix(req.path, "/notifications")) {
     return true;
   }
 
@@ -217,6 +225,27 @@ function paymentServiceUnavailable(error, req, res) {
   );
 }
 
+function notificationServiceUnavailable(error, req, res) {
+  console.error("Notification Service proxy error:", {
+    message: error.message,
+    code: error.code,
+    path: sanitizeGatewayPath(req.originalUrl)
+  });
+
+  if (!res.headersSent) {
+    res.writeHead(502, {
+      "Content-Type": "application/json"
+    });
+  }
+
+  res.end(
+    JSON.stringify({
+      message: "Notification Service unavailable",
+      service: "api-gateway"
+    })
+  );
+}
+
 function sanitizeGatewayPath(path) {
   return String(path)
     .replace(/\/verify-ticket\/[^/?#]+/g, "/verify-ticket/[token]")
@@ -241,6 +270,10 @@ function matchesBookingPaymentsRoute(path) {
 
 function matchesPaymentStatusRoute(path) {
   return /^\/payments\/booking\/[^/]+\/status\/?$/.test(path);
+}
+
+function matchesNotificationBookingRoute(path) {
+  return /^\/notifications\/booking\/[^/]+\/?$/.test(path);
 }
 
 function matchesUserTicketsRoute(path) {
@@ -356,6 +389,20 @@ app.use(
 
 app.use(
   createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/notification-service"),
+    target: NOTIFICATION_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/notification-service": ""
+    },
+    on: {
+      error: notificationServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
     pathFilter: (path) => matchesRoutePrefix(path, "/verify-ticket"),
     target: TICKET_SERVICE_URL,
     changeOrigin: true,
@@ -364,6 +411,28 @@ app.use(
     },
     on: {
       error: ticketServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesNotificationBookingRoute(path),
+    target: NOTIFICATION_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: notificationServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/notifications"),
+    target: NOTIFICATION_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: notificationServiceUnavailable
     }
   })
 );
