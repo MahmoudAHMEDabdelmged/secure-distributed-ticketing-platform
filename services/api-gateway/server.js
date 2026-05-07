@@ -16,6 +16,7 @@ const BOOKING_SERVICE_URL = process.env.BOOKING_SERVICE_URL || "http://localhost
 const TICKET_SERVICE_URL = process.env.TICKET_SERVICE_URL || "http://localhost:5003";
 const PAYMENT_SERVICE_URL = process.env.PAYMENT_SERVICE_URL || "http://localhost:5004";
 const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || "http://localhost:5005";
+const AUDIT_SERVICE_URL = process.env.AUDIT_SERVICE_URL || "http://localhost:5006";
 
 const requestCounts = new Map();
 
@@ -64,7 +65,9 @@ function isPublicRoute(req) {
     "/payment-service/health",
     "/payment-service/health/deep",
     "/notification-service/health",
-    "/notification-service/health/deep"
+    "/notification-service/health/deep",
+    "/audit-service/health",
+    "/audit-service/health/deep"
   ];
 
   if (publicRoutes.includes(req.path)) {
@@ -109,6 +112,11 @@ function isPublicRoute(req) {
 
   // TODO: Protect notification routes with user/admin authorization in the frontend auth flow phase.
   if (matchesRoutePrefix(req.path, "/notifications")) {
+    return true;
+  }
+
+  // TODO: Protect audit routes with admin/security-dashboard authorization in the dashboard phase.
+  if (matchesRoutePrefix(req.path, "/audit")) {
     return true;
   }
 
@@ -241,6 +249,27 @@ function notificationServiceUnavailable(error, req, res) {
   res.end(
     JSON.stringify({
       message: "Notification Service unavailable",
+      service: "api-gateway"
+    })
+  );
+}
+
+function auditServiceUnavailable(error, req, res) {
+  console.error("Audit Service proxy error:", {
+    message: error.message,
+    code: error.code,
+    path: sanitizeGatewayPath(req.originalUrl)
+  });
+
+  if (!res.headersSent) {
+    res.writeHead(502, {
+      "Content-Type": "application/json"
+    });
+  }
+
+  res.end(
+    JSON.stringify({
+      message: "Audit Service unavailable",
       service: "api-gateway"
     })
   );
@@ -403,6 +432,20 @@ app.use(
 
 app.use(
   createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/audit-service"),
+    target: AUDIT_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/audit-service": ""
+    },
+    on: {
+      error: auditServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
     pathFilter: (path) => matchesRoutePrefix(path, "/verify-ticket"),
     target: TICKET_SERVICE_URL,
     changeOrigin: true,
@@ -411,6 +454,17 @@ app.use(
     },
     on: {
       error: ticketServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/audit"),
+    target: AUDIT_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: auditServiceUnavailable
     }
   })
 );

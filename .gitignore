@@ -35,6 +35,7 @@ yarn-error.log*
 .env*
 !services/payment-service/.env.example
 !services/notification-service/.env.example
+!services/audit-service/.env.example
 
 # vercel
 .vercel
