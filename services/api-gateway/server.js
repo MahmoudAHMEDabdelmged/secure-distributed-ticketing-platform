@@ -14,6 +14,7 @@ const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || "http://localhost:5000"
 const EVENTS_SERVICE_URL = process.env.EVENTS_SERVICE_URL || "http://localhost:5001";
 const BOOKING_SERVICE_URL = process.env.BOOKING_SERVICE_URL || "http://localhost:5002";
 const TICKET_SERVICE_URL = process.env.TICKET_SERVICE_URL || "http://localhost:5003";
+const PAYMENT_SERVICE_URL = process.env.PAYMENT_SERVICE_URL || "http://localhost:5004";
 
 const requestCounts = new Map();
 
@@ -58,7 +59,9 @@ function isPublicRoute(req) {
     "/booking-service/health",
     "/booking-service/health/deep",
     "/ticket-service/health",
-    "/ticket-service/health/deep"
+    "/ticket-service/health/deep",
+    "/payment-service/health",
+    "/payment-service/health/deep"
   ];
 
   if (publicRoutes.includes(req.path)) {
@@ -93,6 +96,11 @@ function isPublicRoute(req) {
     matchesUserTicketsRoute(req.path) ||
     matchesRoutePrefix(req.path, "/verify-ticket")
   ) {
+    return true;
+  }
+
+  // TODO: Protect payment routes with user/admin authorization in the frontend auth flow phase.
+  if (matchesRoutePrefix(req.path, "/payments") || matchesBookingPaymentsRoute(req.path)) {
     return true;
   }
 
@@ -188,6 +196,27 @@ function ticketServiceUnavailable(error, req, res) {
   );
 }
 
+function paymentServiceUnavailable(error, req, res) {
+  console.error("Payment Service proxy error:", {
+    message: error.message,
+    code: error.code,
+    path: sanitizeGatewayPath(req.originalUrl)
+  });
+
+  if (!res.headersSent) {
+    res.writeHead(502, {
+      "Content-Type": "application/json"
+    });
+  }
+
+  res.end(
+    JSON.stringify({
+      message: "Payment Service unavailable",
+      service: "api-gateway"
+    })
+  );
+}
+
 function sanitizeGatewayPath(path) {
   return String(path)
     .replace(/\/verify-ticket\/[^/?#]+/g, "/verify-ticket/[token]")
@@ -204,6 +233,14 @@ function matchesUserBookingsRoute(path) {
 
 function matchesBookingTicketsRoute(path) {
   return /^\/bookings\/[^/]+\/tickets\/?$/.test(path);
+}
+
+function matchesBookingPaymentsRoute(path) {
+  return /^\/bookings\/[^/]+\/payments\/?$/.test(path);
+}
+
+function matchesPaymentStatusRoute(path) {
+  return /^\/payments\/booking\/[^/]+\/status\/?$/.test(path);
 }
 
 function matchesUserTicketsRoute(path) {
@@ -305,6 +342,20 @@ app.use(
 
 app.use(
   createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/payment-service"),
+    target: PAYMENT_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/payment-service": ""
+    },
+    on: {
+      error: paymentServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
     pathFilter: (path) => matchesRoutePrefix(path, "/verify-ticket"),
     target: TICKET_SERVICE_URL,
     changeOrigin: true,
@@ -313,6 +364,39 @@ app.use(
     },
     on: {
       error: ticketServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesPaymentStatusRoute(path),
+    target: PAYMENT_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: paymentServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesBookingPaymentsRoute(path),
+    target: PAYMENT_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: paymentServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/payments"),
+    target: PAYMENT_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: paymentServiceUnavailable
     }
   })
 );
