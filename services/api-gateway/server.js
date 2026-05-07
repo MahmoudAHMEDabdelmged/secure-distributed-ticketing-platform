@@ -17,6 +17,7 @@ const TICKET_SERVICE_URL = process.env.TICKET_SERVICE_URL || "http://localhost:5
 const PAYMENT_SERVICE_URL = process.env.PAYMENT_SERVICE_URL || "http://localhost:5004";
 const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || "http://localhost:5005";
 const AUDIT_SERVICE_URL = process.env.AUDIT_SERVICE_URL || "http://localhost:5006";
+const SAGA_SERVICE_URL = process.env.SAGA_SERVICE_URL || "http://localhost:5007";
 
 const requestCounts = new Map();
 
@@ -67,7 +68,9 @@ function isPublicRoute(req) {
     "/notification-service/health",
     "/notification-service/health/deep",
     "/audit-service/health",
-    "/audit-service/health/deep"
+    "/audit-service/health/deep",
+    "/saga-service/health",
+    "/saga-service/health/deep"
   ];
 
   if (publicRoutes.includes(req.path)) {
@@ -117,6 +120,11 @@ function isPublicRoute(req) {
 
   // TODO: Protect audit routes with admin/security-dashboard authorization in the dashboard phase.
   if (matchesRoutePrefix(req.path, "/audit")) {
+    return true;
+  }
+
+  // TODO: Protect saga orchestration with authenticated user context in the frontend auth flow phase.
+  if (matchesRoutePrefix(req.path, "/sagas")) {
     return true;
   }
 
@@ -270,6 +278,27 @@ function auditServiceUnavailable(error, req, res) {
   res.end(
     JSON.stringify({
       message: "Audit Service unavailable",
+      service: "api-gateway"
+    })
+  );
+}
+
+function sagaServiceUnavailable(error, req, res) {
+  console.error("Saga Service proxy error:", {
+    message: error.message,
+    code: error.code,
+    path: sanitizeGatewayPath(req.originalUrl)
+  });
+
+  if (!res.headersSent) {
+    res.writeHead(502, {
+      "Content-Type": "application/json"
+    });
+  }
+
+  res.end(
+    JSON.stringify({
+      message: "Saga Service unavailable",
       service: "api-gateway"
     })
   );
@@ -440,6 +469,31 @@ app.use(
     },
     on: {
       error: auditServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/saga-service"),
+    target: SAGA_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/saga-service": ""
+    },
+    on: {
+      error: sagaServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/sagas"),
+    target: SAGA_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: sagaServiceUnavailable
     }
   })
 );
