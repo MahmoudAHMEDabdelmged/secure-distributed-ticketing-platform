@@ -2,6 +2,7 @@
 
 # dependencies
 /node_modules
+**/node_modules/
 /.pnp
 .pnp.*
 .yarn/*
@@ -50,6 +51,7 @@ node_modules/
 .next/
 .env.local
 .env
+**/.env
 .env*.local
 services/**/node_modules/
 services/**/.env
