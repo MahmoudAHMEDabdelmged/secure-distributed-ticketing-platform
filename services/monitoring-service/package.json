@@ -1,0 +1,20 @@
+{
+  "name": "monitoring-service",
+  "version": "1.0.0",
+  "description": "Monitoring, incident tracking, and distributed systems demo service for the Secure Distributed Ticketing Platform",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "helmet": "^8.0.0",
+    "pg": "^8.20.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
