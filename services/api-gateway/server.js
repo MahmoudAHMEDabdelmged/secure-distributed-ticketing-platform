@@ -18,6 +18,7 @@ const PAYMENT_SERVICE_URL = process.env.PAYMENT_SERVICE_URL || "http://localhost
 const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || "http://localhost:5005";
 const AUDIT_SERVICE_URL = process.env.AUDIT_SERVICE_URL || "http://localhost:5006";
 const SAGA_SERVICE_URL = process.env.SAGA_SERVICE_URL || "http://localhost:5007";
+const MONITORING_SERVICE_URL = process.env.MONITORING_SERVICE_URL || "http://localhost:5008";
 
 const requestCounts = new Map();
 
@@ -70,7 +71,9 @@ function isPublicRoute(req) {
     "/audit-service/health",
     "/audit-service/health/deep",
     "/saga-service/health",
-    "/saga-service/health/deep"
+    "/saga-service/health/deep",
+    "/monitoring-service/health",
+    "/monitoring-service/health/deep"
   ];
 
   if (publicRoutes.includes(req.path)) {
@@ -134,6 +137,11 @@ function isPublicRoute(req) {
 
   // TODO: Protect saga orchestration with authenticated user context in the frontend auth flow phase.
   if (matchesRoutePrefix(req.path, "/sagas")) {
+    return true;
+  }
+
+  // TODO: Protect monitoring dashboard routes with admin/security authorization in Phase 12.
+  if (matchesRoutePrefix(req.path, "/monitoring")) {
     return true;
   }
 
@@ -308,6 +316,27 @@ function sagaServiceUnavailable(error, req, res) {
   res.end(
     JSON.stringify({
       message: "Saga Service unavailable",
+      service: "api-gateway"
+    })
+  );
+}
+
+function monitoringServiceUnavailable(error, req, res) {
+  console.error("Monitoring Service proxy error:", {
+    message: error.message,
+    code: error.code,
+    path: sanitizeGatewayPath(req.originalUrl)
+  });
+
+  if (!res.headersSent) {
+    res.writeHead(502, {
+      "Content-Type": "application/json"
+    });
+  }
+
+  res.end(
+    JSON.stringify({
+      message: "Monitoring Service unavailable",
       service: "api-gateway"
     })
   );
@@ -516,6 +545,31 @@ app.use(
     },
     on: {
       error: sagaServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/monitoring-service"),
+    target: MONITORING_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/monitoring-service": ""
+    },
+    on: {
+      error: monitoringServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/monitoring"),
+    target: MONITORING_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: monitoringServiceUnavailable
     }
   })
 );
