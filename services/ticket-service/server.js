@@ -13,6 +13,7 @@ const BOOKING_SERVICE_URL = (process.env.BOOKING_SERVICE_URL || "http://localhos
 const PAYMENT_SERVICE_URL = (process.env.PAYMENT_SERVICE_URL || "http://localhost:5004").replace(/\/+$/, "");
 const AUTH_SERVICE_URL = (process.env.AUTH_SERVICE_URL || "http://localhost:5000").replace(/\/+$/, "");
 const EVENTS_SERVICE_URL = (process.env.EVENTS_SERVICE_URL || "http://localhost:5001").replace(/\/+$/, "");
+const NOTIFICATION_SERVICE_URL = (process.env.NOTIFICATION_SERVICE_URL || "http://localhost:5005").replace(/\/+$/, "");
 const AUDIT_SERVICE_URL = (process.env.AUDIT_SERVICE_URL || "http://localhost:5006").replace(/\/+$/, "");
 const REQUIRE_PAYMENT_FOR_TICKETS = !["false", "0", "no"].includes(
   String(process.env.REQUIRE_PAYMENT_FOR_TICKETS || "true").trim().toLowerCase()
@@ -382,6 +383,108 @@ async function validateEventGateCode(eventId, code) {
   const payload = await response.json();
 
   return payload && payload.valid === true;
+}
+
+async function validateStaffGateCode(eventId, staffUserId, gateCode) {
+  let response;
+
+  try {
+    response = await fetchWithTimeout(`${EVENTS_SERVICE_URL}/events/${encodeURIComponent(eventId)}/gate-staff/validate-code`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json"
+      },
+      body: JSON.stringify({
+        staff_user_id: staffUserId,
+        gate_code: gateCode
+      }),
+      timeoutMs: 3000
+    });
+  } catch (error) {
+    logDependencyError("Events Service staff gate code validation", error);
+    throw new ApiError(503, "Events Service unavailable, staff gate code cannot be validated now", {
+      message: "Events Service unavailable, staff gate code cannot be validated now",
+      service: "ticket-service"
+    });
+  }
+
+  if (!response.ok) {
+    throw new ApiError(503, "Events Service unavailable, staff gate code cannot be validated now", {
+      message: "Events Service unavailable, staff gate code cannot be validated now",
+      service: "ticket-service"
+    });
+  }
+
+  const payload = await response.json();
+
+  return {
+    valid: payload && payload.valid === true,
+    reason: payload ? payload.reason || null : "INVALID_GATE_CODE",
+    payload
+  };
+}
+
+async function createInAppNotification(notification) {
+  try {
+    const response = await fetchWithTimeout(`${NOTIFICATION_SERVICE_URL}/notifications/in-app`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json"
+      },
+      body: JSON.stringify(notification),
+      timeoutMs: 3000
+    });
+
+    if (!response.ok) {
+      console.warn("In-app notification creation failed for ticket-service:", {
+        type: notification.type,
+        status_code: response.status
+      });
+    }
+  } catch (error) {
+    console.warn("Notification Service unavailable for ticket-service in-app notification:", {
+      type: notification.type,
+      message: error.name === "AbortError" ? "Notification request timed out" : error.message
+    });
+  }
+}
+
+function normalizeGateVerificationBody(body) {
+  const qrToken = typeof body.qr_token === "string"
+    ? body.qr_token.trim()
+    : typeof body.verification_token === "string"
+      ? body.verification_token.trim()
+      : "";
+  const staffUserId = body.staff_user_id || body.gate_staff_user_id;
+  const gateCode = typeof body.gate_code === "string"
+    ? body.gate_code.trim()
+    : typeof body.event_gate_code === "string"
+      ? body.event_gate_code.trim()
+      : "";
+  const eventId = body.event_id || null;
+
+  assertUuid(staffUserId, "staff_user_id");
+
+  if (eventId !== null) {
+    assertUuid(eventId, "event_id");
+  }
+
+  if (!qrToken) {
+    throw new ApiError(400, "qr_token is required");
+  }
+
+  if (!gateCode) {
+    throw new ApiError(400, "gate_code is required");
+  }
+
+  return {
+    qrToken,
+    staffUserId,
+    gateCode,
+    eventId
+  };
 }
 
 async function checkBookingServiceHealth() {
@@ -823,33 +926,19 @@ app.get(
 app.post(
   "/tickets/gate/verify-use",
   asyncHandler(async (req, res) => {
-    const verificationToken = typeof req.body.verification_token === "string"
-      ? req.body.verification_token.trim()
-      : "";
-    const gateStaffUserId = req.body.gate_staff_user_id;
-    const eventGateCode = typeof req.body.event_gate_code === "string"
-      ? req.body.event_gate_code.trim()
-      : "";
-
-    assertUuid(gateStaffUserId, "gate_staff_user_id");
-
-    if (!verificationToken) {
-      throw new ApiError(400, "verification_token is required");
-    }
-
-    if (!eventGateCode) {
-      throw new ApiError(400, "event_gate_code is required");
-    }
+    const gateRequest = normalizeGateVerificationBody(req.body);
+    const staffUserId = gateRequest.staffUserId;
+    const requestedEventId = gateRequest.eventId;
 
     let access;
 
     try {
-      access = await fetchGateStaffAccess(gateStaffUserId);
+      access = await fetchGateStaffAccess(staffUserId);
     } catch (error) {
       if (error instanceof ApiError && error.statusCode === 403) {
         await auditSecurityEvent("GATE_VERIFICATION_DENIED", {
           severity: "high",
-          actor_user_id: gateStaffUserId,
+          actor_user_id: staffUserId,
           action: "Gate verification denied for unknown or unauthorized user",
           endpoint: "/tickets/gate/verify-use",
           method: "POST",
@@ -866,7 +955,7 @@ app.post(
     if (access.role !== "gate_staff" || access.staff_status !== "active" || access.can_verify_tickets !== true) {
       await auditSecurityEvent("GATE_VERIFICATION_DENIED", {
         severity: "high",
-        actor_user_id: gateStaffUserId,
+        actor_user_id: staffUserId,
         actor_role: access.role,
         action: "Gate verification denied for non-gate or inactive staff",
         endpoint: "/tickets/gate/verify-use",
@@ -887,14 +976,14 @@ app.post(
     let tokenHash;
 
     try {
-      const tokenLookup = await getTicketFromVerificationToken(verificationToken);
+      const tokenLookup = await getTicketFromVerificationToken(gateRequest.qrToken);
       ticket = tokenLookup.ticket;
       tokenHash = tokenLookup.tokenHash;
     } catch (error) {
       if (error instanceof ApiError) {
         await auditSecurityEvent("GATE_VERIFICATION_DENIED", {
           severity: "high",
-          actor_user_id: gateStaffUserId,
+          actor_user_id: staffUserId,
           actor_role: access.role,
           action: "Gate verification denied for invalid ticket token",
           endpoint: "/tickets/gate/verify-use",
@@ -909,7 +998,7 @@ app.post(
       throw error;
     }
 
-    let eventId = ticket.event_id;
+    let eventId = requestedEventId || ticket.event_id;
 
     if (!eventId) {
       const booking = await fetchBooking(ticket.booking_id);
@@ -919,7 +1008,7 @@ app.post(
     if (!eventId || !uuidPattern.test(eventId)) {
       await auditSecurityEvent("GATE_VERIFICATION_DENIED", {
         severity: "high",
-        actor_user_id: gateStaffUserId,
+        actor_user_id: staffUserId,
         actor_role: access.role,
         action: "Gate verification denied because ticket event could not be determined",
         resource_type: "ticket",
@@ -936,10 +1025,78 @@ app.post(
       throw new ApiError(409, "Ticket event could not be determined");
     }
 
+    if (ticket.event_id && requestedEventId && ticket.event_id !== requestedEventId) {
+      await auditSecurityEvent("GATE_VERIFICATION_DENIED", {
+        severity: "high",
+        actor_user_id: staffUserId,
+        actor_role: access.role,
+        action: "Gate verification denied because ticket does not belong to requested event",
+        resource_type: "ticket",
+        resource_id: ticket.id,
+        endpoint: "/tickets/gate/verify-use",
+        method: "POST",
+        status: "denied",
+        status_code: 409,
+        is_suspicious: true,
+        suspicious_reason: "Ticket event mismatch",
+        metadata: {
+          requested_event_id: requestedEventId,
+          ticket_event_id: ticket.event_id
+        }
+      });
+
+      await createInAppNotification({
+        scope: "role",
+        recipient_role: "security_staff",
+        type: "GATE_TICKET_EVENT_MISMATCH",
+        title: "Gate verification event mismatch",
+        message: "A gate verification attempt used a QR ticket for a different event.",
+        severity: "critical",
+        resource_type: "ticket",
+        resource_id: ticket.id,
+        metadata: {
+          requested_event_id: requestedEventId,
+          ticket_event_id: ticket.event_id,
+          staff_user_id: staffUserId
+        }
+      });
+
+      throw new ApiError(409, "Ticket does not belong to the requested event");
+    }
+
+    const staffGateCode = await validateStaffGateCode(eventId, staffUserId, gateRequest.gateCode);
+
+    if (!staffGateCode.valid) {
+      await auditSecurityEvent("GATE_VERIFICATION_DENIED", {
+        severity: "high",
+        actor_user_id: staffUserId,
+        actor_role: access.role,
+        action: "Gate verification denied because staff gate code is invalid",
+        resource_type: "ticket",
+        resource_id: ticket.id,
+        endpoint: "/tickets/gate/verify-use",
+        method: "POST",
+        status: "denied",
+        status_code: 403,
+        is_suspicious: true,
+        suspicious_reason: staffGateCode.reason || "Invalid staff gate code",
+        metadata: {
+          event_id: eventId,
+          ticket_status: ticket.status,
+          reason: staffGateCode.reason
+        }
+      });
+
+      throw new ApiError(403, "Invalid staff gate access code", {
+        message: "Invalid staff gate access code",
+        reason: staffGateCode.reason || "INVALID_GATE_CODE"
+      });
+    }
+
     if (ticket.status !== "valid") {
       await auditSecurityEvent("GATE_VERIFICATION_DENIED", {
         severity: "medium",
-        actor_user_id: gateStaffUserId,
+        actor_user_id: staffUserId,
         actor_role: access.role,
         action: "Gate verification denied because ticket is not valid",
         resource_type: "ticket",
@@ -990,7 +1147,7 @@ app.post(
 
       await auditSecurityEvent("GATE_VERIFICATION_DENIED", {
         severity: "medium",
-        actor_user_id: gateStaffUserId,
+        actor_user_id: staffUserId,
         actor_role: access.role,
         action: "Gate verification denied because ticket is expired",
         resource_type: "ticket",
@@ -1010,32 +1167,6 @@ app.post(
         ticket: toGateVerificationTicket(expiredTicket)
       });
     }
-
-    const gateCodeValid = await validateEventGateCode(eventId, eventGateCode);
-
-    if (!gateCodeValid) {
-      await auditSecurityEvent("GATE_VERIFICATION_DENIED", {
-        severity: "high",
-        actor_user_id: gateStaffUserId,
-        actor_role: access.role,
-        action: "Gate verification denied because event gate code is invalid",
-        resource_type: "ticket",
-        resource_id: ticket.id,
-        endpoint: "/tickets/gate/verify-use",
-        method: "POST",
-        status: "denied",
-        status_code: 403,
-        is_suspicious: true,
-        suspicious_reason: "Invalid event gate code",
-        metadata: {
-          event_id: eventId,
-          ticket_status: ticket.status
-        }
-      });
-
-      throw new ApiError(403, "Invalid event gate access code");
-    }
-
     const result = await query(
       `update public.issued_tickets
        set status = 'used',
@@ -1069,7 +1200,7 @@ app.post(
 
       await auditSecurityEvent("GATE_VERIFICATION_DENIED", {
         severity: "medium",
-        actor_user_id: gateStaffUserId,
+        actor_user_id: staffUserId,
         actor_role: access.role,
         action: "Gate verification denied because ticket state changed before use",
         resource_type: "ticket",
@@ -1093,7 +1224,7 @@ app.post(
     const usedTicket = result.rows[0];
 
     await auditSecurityEvent("GATE_VERIFICATION_SUCCESS", {
-      actor_user_id: gateStaffUserId,
+      actor_user_id: staffUserId,
       actor_role: access.role,
       action: "Gate staff verified and used ticket",
       resource_type: "ticket",
@@ -1109,7 +1240,7 @@ app.post(
     });
 
     await auditSecurityEvent("TICKET_USED", {
-      actor_user_id: gateStaffUserId,
+      actor_user_id: staffUserId,
       actor_role: access.role,
       action: "Ticket marked used by secure gate verification",
       resource_type: "ticket",
@@ -1130,7 +1261,7 @@ app.post(
         verification: {
           status: "used",
           event_id: eventId,
-          gate_staff_user_id: gateStaffUserId
+          staff_user_id: staffUserId
         }
       }
     });

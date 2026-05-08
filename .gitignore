@@ -30,12 +30,19 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+.runtime-logs/
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 !services/payment-service/.env.example
 !services/notification-service/.env.example
 !services/audit-service/.env.example
+!services/auth-service/.env.example
+!services/events-service/.env.example
+!services/ticket-service/.env.example
+!services/api-gateway/.env.example
+!services/monitoring-service/.env.example
 
 # vercel
 .vercel
