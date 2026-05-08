@@ -12,12 +12,17 @@ const PORT = process.env.PORT || 5005;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const allowedPaymentStatuses = ["succeeded", "failed", "suspicious"];
+const allowedNotificationScopes = ["user", "role", "global"];
+const allowedNotificationSeverities = ["info", "success", "warning", "critical"];
 const sensitiveMetadataKeys = [
   "password",
   "pass",
   "secret",
   "token",
   "jwt",
+  "qr",
+  "gate_code",
+  "gatecode",
   "card_number",
   "cardnumber",
   "cvv",
@@ -199,6 +204,61 @@ function normalizeOptionalString(value, fieldName) {
   return trimmedValue.length > 0 ? trimmedValue : null;
 }
 
+function normalizeOptionalUuid(value, fieldName) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  assertUuid(value, fieldName);
+  return value;
+}
+
+function normalizeOptionalBoolean(value, fieldName) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const normalizedValue = value.trim().toLowerCase();
+
+    if (["true", "1", "yes"].includes(normalizedValue)) {
+      return true;
+    }
+
+    if (["false", "0", "no"].includes(normalizedValue)) {
+      return false;
+    }
+  }
+
+  throw new ApiError(400, `${fieldName} must be a boolean`);
+}
+
+function parseIntegerQuery(value, fieldName, defaultValue, options = {}) {
+  if (value === undefined || value === null || value === "") {
+    return defaultValue;
+  }
+
+  const parsedValue = Number(value);
+
+  if (!Number.isInteger(parsedValue)) {
+    throw new ApiError(400, `${fieldName} must be an integer`);
+  }
+
+  if (options.min !== undefined && parsedValue < options.min) {
+    throw new ApiError(400, `${fieldName} must be at least ${options.min}`);
+  }
+
+  if (options.max !== undefined && parsedValue > options.max) {
+    throw new ApiError(400, `${fieldName} must be at most ${options.max}`);
+  }
+
+  return parsedValue;
+}
+
 function assertNonNegativeInteger(value, fieldName) {
   if (!Number.isInteger(value) || value < 0) {
     throw new ApiError(400, `${fieldName} must be a non-negative integer`);
@@ -249,6 +309,58 @@ function normalizeObjectMetadata(value, fieldName = "metadata") {
   }
 
   return sanitizeMetadata(value);
+}
+
+function normalizeNotificationScope(value) {
+  const scope = value === undefined || value === null || value === ""
+    ? "user"
+    : String(value).trim().toLowerCase();
+
+  if (!allowedNotificationScopes.includes(scope)) {
+    throw new ApiError(400, `scope must be one of: ${allowedNotificationScopes.join(", ")}`);
+  }
+
+  return scope;
+}
+
+function normalizeNotificationSeverity(value) {
+  const severity = value === undefined || value === null || value === ""
+    ? "info"
+    : String(value).trim().toLowerCase();
+
+  if (!allowedNotificationSeverities.includes(severity)) {
+    throw new ApiError(400, `severity must be one of: ${allowedNotificationSeverities.join(", ")}`);
+  }
+
+  return severity;
+}
+
+function normalizeNotificationType(value) {
+  const type = assertRequiredString(value, "type").toUpperCase();
+
+  if (!/^[A-Z0-9_:-]{3,100}$/.test(type)) {
+    throw new ApiError(400, "type must contain only letters, numbers, underscores, colons, or hyphens");
+  }
+
+  return type;
+}
+
+function parseOptionalFutureDate(value, fieldName) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  if (typeof value !== "string") {
+    throw new ApiError(400, `${fieldName} must be a valid ISO date`);
+  }
+
+  const parsedDate = new Date(value);
+
+  if (Number.isNaN(parsedDate.getTime())) {
+    throw new ApiError(400, `${fieldName} must be a valid ISO date`);
+  }
+
+  return parsedDate.toISOString();
 }
 
 function sanitizeMetadata(value, depth = 0) {
@@ -358,6 +470,94 @@ function toDelivery(row) {
     metadata: row.metadata,
     created_at: row.created_at,
     updated_at: row.updated_at
+  };
+}
+
+function toInAppNotification(row) {
+  return {
+    id: row.id,
+    recipient_user_id: row.recipient_user_id,
+    recipient_role: row.recipient_role,
+    scope: row.scope,
+    type: row.type,
+    title: row.title,
+    message: row.message,
+    severity: row.severity,
+    resource_type: row.resource_type,
+    resource_id: row.resource_id,
+    metadata: row.metadata,
+    is_read: row.is_read,
+    read_at: row.read_at,
+    created_at: row.created_at,
+    expires_at: row.expires_at
+  };
+}
+
+const inAppNotificationSelectSql = `
+  select
+    id,
+    recipient_user_id,
+    recipient_role,
+    scope,
+    type,
+    title,
+    message,
+    severity,
+    resource_type,
+    resource_id,
+    metadata,
+    is_read,
+    read_at,
+    created_at,
+    expires_at
+  from public.in_app_notifications
+`;
+
+function normalizeInAppNotificationInput(body) {
+  const scope = normalizeNotificationScope(body.scope);
+  const recipientUserId = normalizeOptionalUuid(body.recipient_user_id, "recipient_user_id");
+  const recipientRole = normalizeOptionalString(body.recipient_role, "recipient_role");
+
+  if (scope === "user" && !recipientUserId) {
+    throw new ApiError(400, "recipient_user_id is required when scope is user");
+  }
+
+  if (scope === "role" && !recipientRole) {
+    throw new ApiError(400, "recipient_role is required when scope is role");
+  }
+
+  return {
+    recipient_user_id: scope === "user" ? recipientUserId : recipientUserId,
+    recipient_role: scope === "role" ? recipientRole : recipientRole,
+    scope,
+    type: normalizeNotificationType(body.type),
+    title: assertRequiredString(body.title, "title"),
+    message: assertRequiredString(body.message, "message"),
+    severity: normalizeNotificationSeverity(body.severity),
+    resource_type: normalizeOptionalString(body.resource_type, "resource_type"),
+    resource_id: normalizeOptionalString(body.resource_id, "resource_id"),
+    metadata: normalizeObjectMetadata(body.metadata),
+    expires_at: parseOptionalFutureDate(body.expires_at, "expires_at")
+  };
+}
+
+function normalizeNotificationAudience(req) {
+  const userId = normalizeOptionalUuid(
+    req.headers["x-user-id"] || req.query.user_id || req.body?.user_id,
+    "user_id"
+  );
+  const role = normalizeOptionalString(
+    req.headers["x-user-role"] || req.query.role || req.body?.role,
+    "role"
+  );
+
+  if (!userId && !role) {
+    throw new ApiError(400, "user_id or role is required");
+  }
+
+  return {
+    userId,
+    role
   };
 }
 
@@ -848,6 +1048,253 @@ app.post(
     return res.status(result.statusCode).json({
       message: result.message,
       data: toDelivery(result.delivery)
+    });
+  })
+);
+
+app.post(
+  "/notifications/in-app",
+  asyncHandler(async (req, res) => {
+    const notification = normalizeInAppNotificationInput(req.body);
+
+    const result = await runClientQuery(
+      `insert into public.in_app_notifications (
+         recipient_user_id,
+         recipient_role,
+         scope,
+         type,
+         title,
+         message,
+         severity,
+         resource_type,
+         resource_id,
+         metadata,
+         expires_at
+       )
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
+       returning
+         id,
+         recipient_user_id,
+         recipient_role,
+         scope,
+         type,
+         title,
+         message,
+         severity,
+         resource_type,
+         resource_id,
+         metadata,
+         is_read,
+         read_at,
+         created_at,
+         expires_at`,
+      [
+        notification.recipient_user_id,
+        notification.recipient_role,
+        notification.scope,
+        notification.type,
+        notification.title,
+        notification.message,
+        notification.severity,
+        notification.resource_type,
+        notification.resource_id,
+        JSON.stringify(notification.metadata),
+        notification.expires_at
+      ]
+    );
+
+    return res.status(201).json({
+      message: "In-app notification created",
+      data: toInAppNotification(result.rows[0])
+    });
+  })
+);
+
+app.get(
+  "/notifications/in-app",
+  asyncHandler(async (req, res) => {
+    const filters = [];
+    const params = [];
+    const addParam = (value) => {
+      params.push(value);
+      return `$${params.length}`;
+    };
+
+    if (req.query.recipient_user_id !== undefined && req.query.recipient_user_id !== "") {
+      filters.push(`recipient_user_id = ${addParam(normalizeOptionalUuid(req.query.recipient_user_id, "recipient_user_id"))}`);
+    }
+
+    if (req.query.recipient_role !== undefined && req.query.recipient_role !== "") {
+      filters.push(`recipient_role = ${addParam(normalizeOptionalString(req.query.recipient_role, "recipient_role"))}`);
+    }
+
+    if (req.query.scope !== undefined && req.query.scope !== "") {
+      filters.push(`scope = ${addParam(normalizeNotificationScope(req.query.scope))}`);
+    }
+
+    if (req.query.type !== undefined && req.query.type !== "") {
+      filters.push(`type = ${addParam(normalizeNotificationType(req.query.type))}`);
+    }
+
+    if (req.query.severity !== undefined && req.query.severity !== "") {
+      filters.push(`severity = ${addParam(normalizeNotificationSeverity(req.query.severity))}`);
+    }
+
+    const isRead = normalizeOptionalBoolean(req.query.is_read, "is_read");
+
+    if (isRead !== null) {
+      filters.push(`is_read = ${addParam(isRead)}`);
+    }
+
+    const limit = parseIntegerQuery(req.query.limit, "limit", 50, { min: 1, max: 200 });
+    const offset = parseIntegerQuery(req.query.offset, "offset", 0, { min: 0 });
+    const whereSql = filters.length > 0 ? `where ${filters.join(" and ")}` : "";
+
+    params.push(limit);
+    const limitPlaceholder = `$${params.length}`;
+    params.push(offset);
+    const offsetPlaceholder = `$${params.length}`;
+
+    const result = await runClientQuery(
+      `${inAppNotificationSelectSql}
+       ${whereSql}
+       order by created_at desc
+       limit ${limitPlaceholder}
+       offset ${offsetPlaceholder}`,
+      params
+    );
+
+    return res.json({
+      data: result.rows.map(toInAppNotification),
+      pagination: {
+        limit,
+        offset,
+        count: result.rowCount
+      }
+    });
+  })
+);
+
+app.get(
+  "/notifications/in-app/me",
+  asyncHandler(async (req, res) => {
+    const audience = normalizeNotificationAudience(req);
+    const limit = parseIntegerQuery(req.query.limit, "limit", 50, { min: 1, max: 200 });
+    const offset = parseIntegerQuery(req.query.offset, "offset", 0, { min: 0 });
+    const params = [audience.userId, audience.role, limit, offset];
+
+    const result = await runClientQuery(
+      `${inAppNotificationSelectSql}
+       where (
+         (recipient_user_id = $1)
+         or ($2::varchar is not null and scope = 'role' and recipient_role = $2)
+         or scope = 'global'
+       )
+       and (expires_at is null or expires_at > now())
+       order by created_at desc
+       limit $3
+       offset $4`,
+      params
+    );
+
+    return res.json({
+      data: result.rows.map(toInAppNotification),
+      dev_identity_fallback: !req.headers["x-user-id"] && !req.headers["x-user-role"],
+      pagination: {
+        limit,
+        offset,
+        count: result.rowCount
+      }
+    });
+  })
+);
+
+app.get(
+  "/notifications/in-app/unread-count",
+  asyncHandler(async (req, res) => {
+    const audience = normalizeNotificationAudience(req);
+    const result = await runClientQuery(
+      `select count(*)::int as unread_count
+       from public.in_app_notifications
+       where is_read = false
+       and (
+         (recipient_user_id = $1)
+         or ($2::varchar is not null and scope = 'role' and recipient_role = $2)
+         or scope = 'global'
+       )
+       and (expires_at is null or expires_at > now())`,
+      [audience.userId, audience.role]
+    );
+
+    return res.json({
+      unread_count: result.rows[0].unread_count,
+      dev_identity_fallback: !req.headers["x-user-id"] && !req.headers["x-user-role"]
+    });
+  })
+);
+
+app.post(
+  "/notifications/in-app/:id/read",
+  asyncHandler(async (req, res) => {
+    assertUuid(req.params.id, "id");
+
+    const result = await runClientQuery(
+      `update public.in_app_notifications
+       set is_read = true,
+           read_at = coalesce(read_at, now())
+       where id = $1
+       returning
+         id,
+         recipient_user_id,
+         recipient_role,
+         scope,
+         type,
+         title,
+         message,
+         severity,
+         resource_type,
+         resource_id,
+         metadata,
+         is_read,
+         read_at,
+         created_at,
+         expires_at`,
+      [req.params.id]
+    );
+
+    if (result.rowCount === 0) {
+      throw new ApiError(404, "In-app notification not found");
+    }
+
+    return res.json({
+      message: "Notification marked as read",
+      data: toInAppNotification(result.rows[0])
+    });
+  })
+);
+
+app.post(
+  "/notifications/in-app/read-all",
+  asyncHandler(async (req, res) => {
+    const audience = normalizeNotificationAudience(req);
+    const result = await runClientQuery(
+      `update public.in_app_notifications
+       set is_read = true,
+           read_at = coalesce(read_at, now())
+       where is_read = false
+       and (
+         (recipient_user_id = $1)
+         or ($2::varchar is not null and scope = 'role' and recipient_role = $2)
+         or scope = 'global'
+       )
+       returning id`,
+      [audience.userId, audience.role]
+    );
+
+    return res.json({
+      message: "Notifications marked as read",
+      updated_count: result.rowCount,
+      dev_identity_fallback: !req.headers["x-user-id"] && !req.headers["x-user-role"]
     });
   })
 );

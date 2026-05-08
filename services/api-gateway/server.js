@@ -88,6 +88,10 @@ function isPublicRoute(req) {
     return true;
   }
 
+  if (matchesEventGateStaffRoute(req.path)) {
+    return true;
+  }
+
   if (req.method === "GET" && req.path === "/venues") {
     return true;
   }
@@ -382,6 +386,12 @@ function matchesInternalUserAccessRoute(path) {
 
 function matchesEventGateCodeRoute(path) {
   return /^\/events\/[^/]+\/gate-code\/(rotate|validate|status)\/?$/.test(path);
+}
+
+function matchesEventGateStaffRoute(path) {
+  return /^\/events\/gate-staff\/my-events\/?$/.test(path) ||
+    /^\/events\/[^/]+\/gate-staff\/(assignments|my-code|validate-code)\/?$/.test(path) ||
+    /^\/events\/[^/]+\/gate-staff\/assignments\/[^/]+\/(rotate|revoke)\/?$/.test(path);
 }
 
 app.use(rateLimiter);

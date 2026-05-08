@@ -52,7 +52,13 @@ async function checkDatabaseConnection() {
 }
 
 async function checkRequiredSchema() {
-  const requiredTables = ["venues", "events", "event_sections", "event_gate_access_codes"];
+  const requiredTables = [
+    "venues",
+    "events",
+    "event_sections",
+    "event_gate_access_codes",
+    "event_gate_staff_assignments"
+  ];
   const requiredColumns = {
     venues: ["id", "name", "city", "country", "address", "created_at", "updated_at"],
     events: [
@@ -91,6 +97,26 @@ async function checkRequiredSchema() {
       "created_at",
       "expires_at",
       "revoked_at"
+    ],
+    event_gate_staff_assignments: [
+      "id",
+      "event_id",
+      "staff_user_id",
+      "assigned_by_user_id",
+      "gate_code_hash",
+      "gate_code_encrypted",
+      "gate_code_iv",
+      "gate_code_auth_tag",
+      "code_hint",
+      "code_active_from",
+      "code_expires_at",
+      "status",
+      "failed_attempts",
+      "last_used_at",
+      "last_failed_at",
+      "revoked_at",
+      "created_at",
+      "updated_at"
     ]
   };
 
