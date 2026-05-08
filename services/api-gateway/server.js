@@ -19,6 +19,7 @@ const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || "http:/
 const AUDIT_SERVICE_URL = process.env.AUDIT_SERVICE_URL || "http://localhost:5006";
 const SAGA_SERVICE_URL = process.env.SAGA_SERVICE_URL || "http://localhost:5007";
 const MONITORING_SERVICE_URL = process.env.MONITORING_SERVICE_URL || "http://localhost:5008";
+const COORDINATOR_SERVICE_URL = process.env.COORDINATOR_SERVICE_URL || "http://localhost:4010";
 
 const requestCounts = new Map();
 
@@ -73,7 +74,9 @@ function isPublicRoute(req) {
     "/saga-service/health",
     "/saga-service/health/deep",
     "/monitoring-service/health",
-    "/monitoring-service/health/deep"
+    "/monitoring-service/health/deep",
+    "/api/coordinator/health",
+    "/api/coordinator/health/deep"
   ];
 
   if (publicRoutes.includes(req.path)) {
@@ -146,6 +149,11 @@ function isPublicRoute(req) {
 
   // TODO: Protect monitoring dashboard routes with admin/security authorization in Phase 12.
   if (matchesRoutePrefix(req.path, "/monitoring")) {
+    return true;
+  }
+
+  // TODO: Protect coordinator demo routes with admin authorization outside the course demo environment.
+  if (matchesRoutePrefix(req.path, "/api/coordinator")) {
     return true;
   }
 
@@ -341,6 +349,27 @@ function monitoringServiceUnavailable(error, req, res) {
   res.end(
     JSON.stringify({
       message: "Monitoring Service unavailable",
+      service: "api-gateway"
+    })
+  );
+}
+
+function coordinatorServiceUnavailable(error, req, res) {
+  console.error("Coordinator Service proxy error:", {
+    message: error.message,
+    code: error.code,
+    path: req.originalUrl
+  });
+
+  if (!res.headersSent) {
+    res.writeHead(502, {
+      "Content-Type": "application/json"
+    });
+  }
+
+  res.end(
+    JSON.stringify({
+      message: "Coordinator Service unavailable",
       service: "api-gateway"
     })
   );
@@ -569,6 +598,20 @@ app.use(
     },
     on: {
       error: monitoringServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/api/coordinator"),
+    target: COORDINATOR_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/api/coordinator": ""
+    },
+    on: {
+      error: coordinatorServiceUnavailable
     }
   })
 );

@@ -750,6 +750,7 @@ export function AppExperience({
           <Link href="/admin">Admin</Link>
           <Link href="/security">Security</Link>
           <Link href="/monitoring">Monitoring</Link>
+          <Link href="/distributed-systems">Distributed Systems</Link>
           <Link href="/staff">Staff</Link>
         </nav>
 
@@ -858,6 +859,7 @@ export function AppExperience({
           <div className="button-row">
             <Link className="primary-button" href="/events">Browse events</Link>
             <Link className="secondary-button" href="/monitoring">Open monitoring</Link>
+            <Link className="secondary-button" href="/distributed-systems">Open consensus demo</Link>
           </div>
         </div>
         <div className="hero-visual" aria-hidden="true">
