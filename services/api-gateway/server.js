@@ -19,6 +19,7 @@ const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || "http:/
 const AUDIT_SERVICE_URL = process.env.AUDIT_SERVICE_URL || "http://localhost:5006";
 const SAGA_SERVICE_URL = process.env.SAGA_SERVICE_URL || "http://localhost:5007";
 const MONITORING_SERVICE_URL = process.env.MONITORING_SERVICE_URL || "http://localhost:5008";
+const COORDINATOR_SERVICE_URL = process.env.COORDINATOR_SERVICE_URL || "http://localhost:4010";
 
 const requestCounts = new Map();
 
@@ -26,7 +27,7 @@ function rateLimiter(req, res, next) {
   const ip = req.ip;
   const now = Date.now();
   const windowMs = 60 * 1000;
-  const maxRequests = 20;
+  const maxRequests = 120;
 
   const record = requestCounts.get(ip) || {
     count: 0,
@@ -52,12 +53,29 @@ function rateLimiter(req, res, next) {
   next();
 }
 
+function normalizeGatewayPath(path) {
+  const normalized = String(path || "/").replace(/\/+$/, "");
+  return normalized || "/";
+}
+
 function isPublicRoute(req) {
-  const publicRoutes = [
+  const path = normalizeGatewayPath(req.path);
+  const method = req.method.toUpperCase();
+
+  const publicExactRoutes = new Set([
     "/health",
+
+    // Direct auth-service style routes.
     "/auth/health",
     "/auth/register",
     "/auth/login",
+
+    // Frontend/API style auth routes.
+    "/api/auth/health",
+    "/api/auth/register",
+    "/api/auth/login",
+
+    // Direct service health routes.
     "/events-service/health",
     "/events-service/health/deep",
     "/booking-service/health",
@@ -73,79 +91,82 @@ function isPublicRoute(req) {
     "/saga-service/health",
     "/saga-service/health/deep",
     "/monitoring-service/health",
-    "/monitoring-service/health/deep"
-  ];
+    "/monitoring-service/health/deep",
 
-  if (publicRoutes.includes(req.path)) {
+    // Legacy public health aliases.
+    "/events/health",
+    "/events/health/deep",
+    "/bookings/health",
+    "/bookings/health/deep",
+    "/tickets/health",
+    "/tickets/health/deep",
+    "/payments/health",
+    "/payments/health/deep",
+    "/notifications/health",
+    "/notifications/health/deep",
+    "/audit/health",
+    "/audit/health/deep",
+    "/sagas/health",
+    "/sagas/health/deep",
+    "/monitoring/health",
+    "/monitoring/health/deep",
+
+    // API style health routes.
+    "/api/events/health",
+    "/api/events/health/deep",
+    "/api/bookings/health",
+    "/api/bookings/health/deep",
+    "/api/tickets/health",
+    "/api/tickets/health/deep",
+    "/api/payments/health",
+    "/api/payments/health/deep",
+    "/api/notifications/health",
+    "/api/notifications/health/deep",
+    "/api/audit/health",
+    "/api/audit/health/deep",
+    "/api/sagas/health",
+    "/api/sagas/health/deep",
+    "/api/monitoring/health",
+    "/api/monitoring/health/deep",
+
+    // Coordinator safe read-only / readiness routes.
+    "/api/coordinator/health",
+    "/api/coordinator/health/deep",
+    "/api/coordinator/cluster",
+    "/api/coordinator/fault-tolerance",
+    "/api/coordinator/leader"
+  ]);
+
+  if (publicExactRoutes.has(path)) {
     return true;
   }
 
-  if (req.method === "GET" && (req.path === "/events" || req.path.startsWith("/events/"))) {
-    return true;
-  }
-
-  if (matchesEventGateCodeRoute(req.path)) {
-    return true;
-  }
-
-  if (matchesEventGateStaffRoute(req.path)) {
-    return true;
-  }
-
-  if (req.method === "GET" && req.path === "/venues") {
-    return true;
-  }
-
-  // TODO: Protect these write routes with organizer/admin authorization in the admin flow phase.
-  if ((req.method === "POST") && (req.path === "/events" || req.path === "/venues")) {
-    return true;
-  }
-
-  // TODO: Derive user_id from JWT and protect booking routes in the admin/user flow phase.
+  // Public event discovery.
   if (
-    matchesRoutePrefix(req.path, "/bookings") ||
-    matchesUserBookingsRoute(req.path)
+    method === "GET" &&
+    (
+      path === "/events" ||
+      path.startsWith("/events/") ||
+      path === "/api/events" ||
+      path.startsWith("/api/events/")
+    )
   ) {
     return true;
   }
 
-  // TODO: Protect ticket issuance and ticket state changes with user/admin authorization.
+  // Public venues listing.
+  if (method === "GET" && (path === "/venues" || path === "/api/venues")) {
+    return true;
+  }
+
+  // Public QR verification endpoint. It returns hardened public verification data.
   if (
-    matchesRoutePrefix(req.path, "/tickets") ||
-    matchesBookingTicketsRoute(req.path) ||
-    matchesUserTicketsRoute(req.path) ||
-    matchesRoutePrefix(req.path, "/verify-ticket")
+    method === "GET" &&
+    (
+      matchesRoutePrefix(path, "/verify-ticket") ||
+      matchesRoutePrefix(path, "/api/verify-ticket")
+    )
   ) {
-    return true;
-  }
-
-  // Staff governance services enforce role/status checks until gateway RBAC is introduced.
-  if (matchesRoutePrefix(req.path, "/staff") || matchesInternalUserAccessRoute(req.path)) {
-    return true;
-  }
-
-  // TODO: Protect payment routes with user/admin authorization in the frontend auth flow phase.
-  if (matchesRoutePrefix(req.path, "/payments") || matchesBookingPaymentsRoute(req.path)) {
-    return true;
-  }
-
-  // TODO: Protect notification routes with user/admin authorization in the frontend auth flow phase.
-  if (matchesRoutePrefix(req.path, "/notifications")) {
-    return true;
-  }
-
-  // TODO: Protect audit routes with admin/security-dashboard authorization in the dashboard phase.
-  if (matchesRoutePrefix(req.path, "/audit")) {
-    return true;
-  }
-
-  // TODO: Protect saga orchestration with authenticated user context in the frontend auth flow phase.
-  if (matchesRoutePrefix(req.path, "/sagas")) {
-    return true;
-  }
-
-  // TODO: Protect monitoring dashboard routes with admin/security authorization in Phase 12.
-  if (matchesRoutePrefix(req.path, "/monitoring")) {
     return true;
   }
 
@@ -346,10 +367,33 @@ function monitoringServiceUnavailable(error, req, res) {
   );
 }
 
+function coordinatorServiceUnavailable(error, req, res) {
+  console.error("Coordinator Service proxy error:", {
+    message: error.message,
+    code: error.code,
+    path: req.originalUrl
+  });
+
+  if (!res.headersSent) {
+    res.writeHead(502, {
+      "Content-Type": "application/json"
+    });
+  }
+
+  res.end(
+    JSON.stringify({
+      message: "Coordinator Service unavailable",
+      service: "api-gateway"
+    })
+  );
+}
+
 function sanitizeGatewayPath(path) {
   return String(path)
     .replace(/\/verify-ticket\/[^/?#]+/g, "/verify-ticket/[token]")
-    .replace(/\/tickets\/verify\/[^/?#]+/g, "/tickets/verify/[token]");
+    .replace(/\/api\/verify-ticket\/[^/?#]+/g, "/api/verify-ticket/[token]")
+    .replace(/\/tickets\/verify\/[^/?#]+/g, "/tickets/verify/[token]")
+    .replace(/\/api\/tickets\/verify\/[^/?#]+/g, "/api/tickets/verify/[token]");
 }
 
 function matchesRoutePrefix(path, prefix) {
@@ -357,41 +401,56 @@ function matchesRoutePrefix(path, prefix) {
 }
 
 function matchesUserBookingsRoute(path) {
-  return /^\/users\/[^/]+\/bookings\/?$/.test(path);
+  return /^\/users\/[^/]+\/bookings\/?$/.test(path) ||
+    /^\/api\/users\/[^/]+\/bookings\/?$/.test(path);
 }
 
 function matchesBookingTicketsRoute(path) {
-  return /^\/bookings\/[^/]+\/tickets\/?$/.test(path);
+  return /^\/bookings\/[^/]+\/tickets\/?$/.test(path) ||
+    /^\/api\/bookings\/[^/]+\/tickets\/?$/.test(path);
 }
 
 function matchesBookingPaymentsRoute(path) {
-  return /^\/bookings\/[^/]+\/payments\/?$/.test(path);
+  return /^\/bookings\/[^/]+\/payments\/?$/.test(path) ||
+    /^\/api\/bookings\/[^/]+\/payments\/?$/.test(path);
 }
 
 function matchesPaymentStatusRoute(path) {
-  return /^\/payments\/booking\/[^/]+\/status\/?$/.test(path);
+  return /^\/payments\/booking\/[^/]+\/status\/?$/.test(path) ||
+    /^\/api\/payments\/booking\/[^/]+\/status\/?$/.test(path);
 }
 
 function matchesNotificationBookingRoute(path) {
-  return /^\/notifications\/booking\/[^/]+\/?$/.test(path);
+  return /^\/notifications\/booking\/[^/]+\/?$/.test(path) ||
+    /^\/api\/notifications\/booking\/[^/]+\/?$/.test(path);
 }
 
 function matchesUserTicketsRoute(path) {
-  return /^\/users\/[^/]+\/tickets\/?$/.test(path);
+  return /^\/users\/[^/]+\/tickets\/?$/.test(path) ||
+    /^\/api\/users\/[^/]+\/tickets\/?$/.test(path);
 }
 
 function matchesInternalUserAccessRoute(path) {
-  return /^\/internal\/users\/[^/]+\/access\/?$/.test(path);
+  return /^\/internal\/users\/[^/]+\/access\/?$/.test(path) ||
+    /^\/api\/internal\/users\/[^/]+\/access\/?$/.test(path);
 }
 
 function matchesEventGateCodeRoute(path) {
-  return /^\/events\/[^/]+\/gate-code\/(rotate|validate|status)\/?$/.test(path);
+  return /^\/events\/[^/]+\/gate-code\/(rotate|validate|status)\/?$/.test(path) ||
+    /^\/api\/events\/[^/]+\/gate-code\/(rotate|validate|status)\/?$/.test(path);
 }
 
 function matchesEventGateStaffRoute(path) {
   return /^\/events\/gate-staff\/my-events\/?$/.test(path) ||
+    /^\/api\/events\/gate-staff\/my-events\/?$/.test(path) ||
     /^\/events\/[^/]+\/gate-staff\/(assignments|my-code|validate-code)\/?$/.test(path) ||
-    /^\/events\/[^/]+\/gate-staff\/assignments\/[^/]+\/(rotate|revoke)\/?$/.test(path);
+    /^\/api\/events\/[^/]+\/gate-staff\/(assignments|my-code|validate-code)\/?$/.test(path) ||
+    /^\/events\/[^/]+\/gate-staff\/assignments\/[^/]+\/(rotate|revoke)\/?$/.test(path) ||
+    /^\/api\/events\/[^/]+\/gate-staff\/assignments\/[^/]+\/(rotate|revoke)\/?$/.test(path);
+}
+
+function stripApiPrefix(path, prefix, replacement) {
+  return path.replace(prefix, replacement);
 }
 
 app.use(rateLimiter);
@@ -412,6 +471,12 @@ app.get("/secure-test", (req, res) => {
   });
 });
 
+/**
+ * Auth service
+ * Supports both:
+ * - /auth/login
+ * - /api/auth/login
+ */
 app.use(
   "/auth",
   createProxyMiddleware({
@@ -419,6 +484,17 @@ app.use(
     changeOrigin: true,
     pathRewrite: {
       "^/auth": ""
+    }
+  })
+);
+
+app.use(
+  "/api/auth",
+  createProxyMiddleware({
+    target: AUTH_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/api/auth": ""
     }
   })
 );
@@ -433,12 +509,140 @@ app.use(
 
 app.use(
   createProxyMiddleware({
-    pathFilter: (path) => matchesInternalUserAccessRoute(path),
+    pathFilter: (path) => matchesRoutePrefix(path, "/api/staff"),
     target: AUTH_SERVICE_URL,
-    changeOrigin: true
+    changeOrigin: true,
+    pathRewrite: (path) => stripApiPrefix(path, /^\/api\/staff/, "/staff")
   })
 );
 
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesInternalUserAccessRoute(path),
+    target: AUTH_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: (path) => path.replace(/^\/api/, "")
+  })
+);
+
+/**
+ * Health aliases for /api/{service}/health.
+ */
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => path === "/api/events/health" || path === "/api/events/health/deep",
+    target: EVENTS_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/api/events": ""
+    },
+    on: {
+      error: eventsServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => path === "/api/bookings/health" || path === "/api/bookings/health/deep",
+    target: BOOKING_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/api/bookings": ""
+    },
+    on: {
+      error: bookingServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => path === "/api/tickets/health" || path === "/api/tickets/health/deep",
+    target: TICKET_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/api/tickets": ""
+    },
+    on: {
+      error: ticketServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => path === "/api/payments/health" || path === "/api/payments/health/deep",
+    target: PAYMENT_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/api/payments": ""
+    },
+    on: {
+      error: paymentServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => path === "/api/notifications/health" || path === "/api/notifications/health/deep",
+    target: NOTIFICATION_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/api/notifications": ""
+    },
+    on: {
+      error: notificationServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => path === "/api/audit/health" || path === "/api/audit/health/deep",
+    target: AUDIT_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/api/audit": ""
+    },
+    on: {
+      error: auditServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => path === "/api/sagas/health" || path === "/api/sagas/health/deep",
+    target: SAGA_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/api/sagas": ""
+    },
+    on: {
+      error: sagaServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => path === "/api/monitoring/health" || path === "/api/monitoring/health/deep",
+    target: MONITORING_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/api/monitoring": ""
+    },
+    on: {
+      error: monitoringServiceUnavailable
+    }
+  })
+);
+
+/**
+ * Events service
+ */
 app.use(
   createProxyMiddleware({
     pathFilter: (path) => matchesRoutePrefix(path, "/events-service"),
@@ -447,6 +651,18 @@ app.use(
     pathRewrite: {
       "^/events-service": ""
     },
+    on: {
+      error: eventsServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/api/events"),
+    target: EVENTS_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: (path) => stripApiPrefix(path, /^\/api\/events/, "/events"),
     on: {
       error: eventsServiceUnavailable
     }
@@ -466,6 +682,18 @@ app.use(
 
 app.use(
   createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/api/venues"),
+    target: EVENTS_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: (path) => stripApiPrefix(path, /^\/api\/venues/, "/venues"),
+    on: {
+      error: eventsServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
     pathFilter: (path) => matchesRoutePrefix(path, "/venues"),
     target: EVENTS_SERVICE_URL,
     changeOrigin: true,
@@ -475,6 +703,9 @@ app.use(
   })
 );
 
+/**
+ * Booking service
+ */
 app.use(
   createProxyMiddleware({
     pathFilter: (path) => matchesRoutePrefix(path, "/booking-service"),
@@ -491,208 +722,24 @@ app.use(
 
 app.use(
   createProxyMiddleware({
-    pathFilter: (path) => matchesRoutePrefix(path, "/ticket-service"),
-    target: TICKET_SERVICE_URL,
+    pathFilter: (path) => matchesRoutePrefix(path, "/api/bookings"),
+    target: BOOKING_SERVICE_URL,
     changeOrigin: true,
-    pathRewrite: {
-      "^/ticket-service": ""
-    },
+    pathRewrite: (path) => stripApiPrefix(path, /^\/api\/bookings/, "/bookings"),
     on: {
-      error: ticketServiceUnavailable
+      error: bookingServiceUnavailable
     }
   })
 );
 
 app.use(
   createProxyMiddleware({
-    pathFilter: (path) => matchesRoutePrefix(path, "/payment-service"),
-    target: PAYMENT_SERVICE_URL,
+    pathFilter: (path) => matchesRoutePrefix(path, "/api/users") && path.includes("/bookings"),
+    target: BOOKING_SERVICE_URL,
     changeOrigin: true,
-    pathRewrite: {
-      "^/payment-service": ""
-    },
+    pathRewrite: (path) => path.replace(/^\/api/, ""),
     on: {
-      error: paymentServiceUnavailable
-    }
-  })
-);
-
-app.use(
-  createProxyMiddleware({
-    pathFilter: (path) => matchesRoutePrefix(path, "/notification-service"),
-    target: NOTIFICATION_SERVICE_URL,
-    changeOrigin: true,
-    pathRewrite: {
-      "^/notification-service": ""
-    },
-    on: {
-      error: notificationServiceUnavailable
-    }
-  })
-);
-
-app.use(
-  createProxyMiddleware({
-    pathFilter: (path) => matchesRoutePrefix(path, "/audit-service"),
-    target: AUDIT_SERVICE_URL,
-    changeOrigin: true,
-    pathRewrite: {
-      "^/audit-service": ""
-    },
-    on: {
-      error: auditServiceUnavailable
-    }
-  })
-);
-
-app.use(
-  createProxyMiddleware({
-    pathFilter: (path) => matchesRoutePrefix(path, "/saga-service"),
-    target: SAGA_SERVICE_URL,
-    changeOrigin: true,
-    pathRewrite: {
-      "^/saga-service": ""
-    },
-    on: {
-      error: sagaServiceUnavailable
-    }
-  })
-);
-
-app.use(
-  createProxyMiddleware({
-    pathFilter: (path) => matchesRoutePrefix(path, "/monitoring-service"),
-    target: MONITORING_SERVICE_URL,
-    changeOrigin: true,
-    pathRewrite: {
-      "^/monitoring-service": ""
-    },
-    on: {
-      error: monitoringServiceUnavailable
-    }
-  })
-);
-
-app.use(
-  createProxyMiddleware({
-    pathFilter: (path) => matchesRoutePrefix(path, "/monitoring"),
-    target: MONITORING_SERVICE_URL,
-    changeOrigin: true,
-    on: {
-      error: monitoringServiceUnavailable
-    }
-  })
-);
-
-app.use(
-  createProxyMiddleware({
-    pathFilter: (path) => matchesRoutePrefix(path, "/sagas"),
-    target: SAGA_SERVICE_URL,
-    changeOrigin: true,
-    on: {
-      error: sagaServiceUnavailable
-    }
-  })
-);
-
-app.use(
-  createProxyMiddleware({
-    pathFilter: (path) => path === "/tickets/gate/verify-use",
-    target: TICKET_SERVICE_URL,
-    changeOrigin: true,
-    on: {
-      error: ticketServiceUnavailable
-    }
-  })
-);
-
-app.use(
-  createProxyMiddleware({
-    pathFilter: (path) => matchesRoutePrefix(path, "/verify-ticket"),
-    target: TICKET_SERVICE_URL,
-    changeOrigin: true,
-    pathRewrite: {
-      "^/verify-ticket": "/tickets/verify"
-    },
-    on: {
-      error: ticketServiceUnavailable
-    }
-  })
-);
-
-app.use(
-  createProxyMiddleware({
-    pathFilter: (path) => matchesRoutePrefix(path, "/audit"),
-    target: AUDIT_SERVICE_URL,
-    changeOrigin: true,
-    on: {
-      error: auditServiceUnavailable
-    }
-  })
-);
-
-app.use(
-  createProxyMiddleware({
-    pathFilter: (path) => matchesNotificationBookingRoute(path),
-    target: NOTIFICATION_SERVICE_URL,
-    changeOrigin: true,
-    on: {
-      error: notificationServiceUnavailable
-    }
-  })
-);
-
-app.use(
-  createProxyMiddleware({
-    pathFilter: (path) => matchesRoutePrefix(path, "/notifications"),
-    target: NOTIFICATION_SERVICE_URL,
-    changeOrigin: true,
-    on: {
-      error: notificationServiceUnavailable
-    }
-  })
-);
-
-app.use(
-  createProxyMiddleware({
-    pathFilter: (path) => matchesPaymentStatusRoute(path),
-    target: PAYMENT_SERVICE_URL,
-    changeOrigin: true,
-    on: {
-      error: paymentServiceUnavailable
-    }
-  })
-);
-
-app.use(
-  createProxyMiddleware({
-    pathFilter: (path) => matchesBookingPaymentsRoute(path),
-    target: PAYMENT_SERVICE_URL,
-    changeOrigin: true,
-    on: {
-      error: paymentServiceUnavailable
-    }
-  })
-);
-
-app.use(
-  createProxyMiddleware({
-    pathFilter: (path) => matchesRoutePrefix(path, "/payments"),
-    target: PAYMENT_SERVICE_URL,
-    changeOrigin: true,
-    on: {
-      error: paymentServiceUnavailable
-    }
-  })
-);
-
-app.use(
-  createProxyMiddleware({
-    pathFilter: (path) => matchesBookingTicketsRoute(path),
-    target: TICKET_SERVICE_URL,
-    changeOrigin: true,
-    on: {
-      error: ticketServiceUnavailable
+      error: bookingServiceUnavailable
     }
   })
 );
@@ -713,8 +760,65 @@ app.use(
     pathFilter: (path) => matchesUserBookingsRoute(path),
     target: BOOKING_SERVICE_URL,
     changeOrigin: true,
+    pathRewrite: (path) => path.replace(/^\/api/, ""),
     on: {
       error: bookingServiceUnavailable
+    }
+  })
+);
+
+/**
+ * Ticket service
+ */
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/ticket-service"),
+    target: TICKET_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/ticket-service": ""
+    },
+    on: {
+      error: ticketServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => path === "/tickets/gate/verify-use" || path === "/api/tickets/gate/verify-use",
+    target: TICKET_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: (path) => path.replace(/^\/api/, ""),
+    on: {
+      error: ticketServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/verify-ticket") || matchesRoutePrefix(path, "/api/verify-ticket"),
+    target: TICKET_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: (path) =>
+      path
+        .replace(/^\/api\/verify-ticket/, "/tickets/verify")
+        .replace(/^\/verify-ticket/, "/tickets/verify"),
+    on: {
+      error: ticketServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesBookingTicketsRoute(path),
+    target: TICKET_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: (path) => path.replace(/^\/api/, ""),
+    on: {
+      error: ticketServiceUnavailable
     }
   })
 );
@@ -724,6 +828,19 @@ app.use(
     pathFilter: (path) => matchesUserTicketsRoute(path),
     target: TICKET_SERVICE_URL,
     changeOrigin: true,
+    pathRewrite: (path) => path.replace(/^\/api/, ""),
+    on: {
+      error: ticketServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/api/tickets"),
+    target: TICKET_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: (path) => stripApiPrefix(path, /^\/api\/tickets/, "/tickets"),
     on: {
       error: ticketServiceUnavailable
     }
@@ -737,6 +854,247 @@ app.use(
     changeOrigin: true,
     on: {
       error: ticketServiceUnavailable
+    }
+  })
+);
+
+/**
+ * Payment service
+ */
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/payment-service"),
+    target: PAYMENT_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/payment-service": ""
+    },
+    on: {
+      error: paymentServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesPaymentStatusRoute(path) || matchesBookingPaymentsRoute(path),
+    target: PAYMENT_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: (path) => path.replace(/^\/api/, ""),
+    on: {
+      error: paymentServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/api/payments"),
+    target: PAYMENT_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: (path) => stripApiPrefix(path, /^\/api\/payments/, "/payments"),
+    on: {
+      error: paymentServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/payments"),
+    target: PAYMENT_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: paymentServiceUnavailable
+    }
+  })
+);
+
+/**
+ * Notification service
+ */
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/notification-service"),
+    target: NOTIFICATION_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/notification-service": ""
+    },
+    on: {
+      error: notificationServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesNotificationBookingRoute(path),
+    target: NOTIFICATION_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: (path) => path.replace(/^\/api/, ""),
+    on: {
+      error: notificationServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/api/notifications"),
+    target: NOTIFICATION_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: (path) => stripApiPrefix(path, /^\/api\/notifications/, "/notifications"),
+    on: {
+      error: notificationServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/notifications"),
+    target: NOTIFICATION_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: notificationServiceUnavailable
+    }
+  })
+);
+
+/**
+ * Audit service
+ */
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/audit-service"),
+    target: AUDIT_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/audit-service": ""
+    },
+    on: {
+      error: auditServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/api/audit"),
+    target: AUDIT_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: (path) => stripApiPrefix(path, /^\/api\/audit/, "/audit"),
+    on: {
+      error: auditServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/audit"),
+    target: AUDIT_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: auditServiceUnavailable
+    }
+  })
+);
+
+/**
+ * Saga service
+ */
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/saga-service"),
+    target: SAGA_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/saga-service": ""
+    },
+    on: {
+      error: sagaServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/api/sagas"),
+    target: SAGA_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: (path) => stripApiPrefix(path, /^\/api\/sagas/, "/sagas"),
+    on: {
+      error: sagaServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/sagas"),
+    target: SAGA_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: sagaServiceUnavailable
+    }
+  })
+);
+
+/**
+ * Monitoring service
+ */
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/monitoring-service"),
+    target: MONITORING_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/monitoring-service": ""
+    },
+    on: {
+      error: monitoringServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/api/monitoring"),
+    target: MONITORING_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: (path) => stripApiPrefix(path, /^\/api\/monitoring/, "/monitoring"),
+    on: {
+      error: monitoringServiceUnavailable
+    }
+  })
+);
+
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/monitoring"),
+    target: MONITORING_SERVICE_URL,
+    changeOrigin: true,
+    on: {
+      error: monitoringServiceUnavailable
+    }
+  })
+);
+
+/**
+ * Coordinator service
+ */
+app.use(
+  createProxyMiddleware({
+    pathFilter: (path) => matchesRoutePrefix(path, "/api/coordinator"),
+    target: COORDINATOR_SERVICE_URL,
+    changeOrigin: true,
+    pathRewrite: {
+      "^/api/coordinator": ""
+    },
+    on: {
+      error: coordinatorServiceUnavailable
     }
   })
 );

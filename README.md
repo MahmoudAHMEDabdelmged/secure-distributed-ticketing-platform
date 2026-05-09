@@ -20,6 +20,7 @@ A college project for building a secure event ticketing platform with distribute
 - Admin event and inventory management
 - Neon-backed service databases
 - Distributed-system notes for reservation expiry, concurrency, and scaling
+- Working distributed consensus and coordination demo with leader election, quorum broadcast, crash-recovery, ordering, and a replicated state machine
 
 ## Project Architecture Summary
 
@@ -46,3 +47,9 @@ Real secrets must never be committed to the repository. Use `.env.example` as a 
 1. `npm install`
 2. Copy `.env.example` to `.env.local`
 3. `npm run dev`
+
+## Distributed Consensus Demo
+
+The coordinator layer lives in `services/coordinator-service` with its own `coordinator-db` migration under `database/coordinator-db/migrations/`. It is exposed through the API Gateway at `/api/coordinator/...` and has a dashboard at `/distributed-systems`.
+
+Read `docs/distributed-consensus-coordination.md` for the design and `docs/coordinator-demo-script.md` for the curl demo sequence.

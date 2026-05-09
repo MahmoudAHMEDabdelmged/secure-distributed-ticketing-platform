@@ -1,4 +1,4 @@
-const crypto = require("crypto");
+﻿const crypto = require("crypto");
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -142,6 +142,64 @@ function normalizeOptionalString(value, fieldName, maxLength = 500) {
   return trimmedValue;
 }
 
+function normalizeRequiredString(value, fieldName, maxLength = 255) {
+  const normalized = normalizeOptionalString(value, fieldName, maxLength);
+
+  if (!normalized) {
+    throw new ApiError(400, `${fieldName} is required`);
+  }
+
+  return normalized;
+}
+
+function normalizePhone(value, fieldName = "phone") {
+  const phone = normalizeRequiredString(value, fieldName, 40);
+
+  if (!/^[+]?[-\d\s().]{7,40}$/.test(phone)) {
+    throw new ApiError(400, `${fieldName} must be a valid phone number`);
+  }
+
+  return phone;
+}
+
+function getPasswordValidationErrors(password) {
+  const value = typeof password === "string" ? password : "";
+  const errors = [];
+
+  if (value.length < 8) {
+    errors.push("Password must be at least 8 characters");
+  }
+
+  if (!/[A-Z]/.test(value)) {
+    errors.push("Password must include at least one uppercase letter");
+  }
+
+  if (!/[a-z]/.test(value)) {
+    errors.push("Password must include at least one lowercase letter");
+  }
+
+  if (!/\d/.test(value)) {
+    errors.push("Password must include at least one number");
+  }
+
+  if (!/[^A-Za-z0-9]/.test(value)) {
+    errors.push("Password must include at least one symbol");
+  }
+
+  return errors;
+}
+
+function assertStrongPassword(password) {
+  const errors = getPasswordValidationErrors(password);
+
+  if (errors.length > 0) {
+    throw new ApiError(400, "Password does not meet security requirements", {
+      error: "Password does not meet security requirements",
+      password_errors: errors
+    });
+  }
+}
+
 function normalizeMetadata(value) {
   if (value === undefined || value === null) {
     return {};
@@ -246,9 +304,14 @@ async function auditSecurityEvent(eventType, options = {}) {
 }
 
 function toSafeUser(user) {
+  const fullName = user.full_name || user.name || null;
+
   return {
     id: user.id,
     email: user.email,
+    name: fullName,
+    full_name: fullName,
+    phone: user.phone || null,
     role: user.role,
     staff_status: user.staff_status || "active",
     must_reset_password: user.must_reset_password === true,
@@ -258,9 +321,14 @@ function toSafeUser(user) {
 }
 
 function toStaffUser(user) {
+  const fullName = user.full_name || user.name || null;
+
   return {
     id: user.id,
     email: user.email,
+    name: fullName,
+    full_name: fullName,
+    phone: user.phone || null,
     role: user.role,
     staff_status: user.staff_status || "active",
     must_reset_password: user.must_reset_password === true,
@@ -367,6 +435,8 @@ async function fetchUserById(userId, client = { query }) {
     `select
        id,
        email,
+       full_name,
+       phone,
        role,
        staff_status,
        must_reset_password,
@@ -388,6 +458,8 @@ async function fetchUserByEmail(email, client = { query }) {
     `select
        id,
        email,
+       full_name,
+       phone,
        role,
        staff_status,
        must_reset_password,
@@ -455,7 +527,7 @@ async function fetchApprovals(requestId, client = { query }) {
   return result.rows;
 }
 
-async function ensurePendingTargetUser({ email, requestedByUserId }, client) {
+async function ensurePendingTargetUser({ email, requestedByUserId, fullName }, client) {
   const existingUser = await fetchUserByEmail(email, client);
 
   if (existingUser) {
@@ -472,16 +544,19 @@ async function ensurePendingTargetUser({ email, requestedByUserId }, client) {
     client,
     `insert into public.users (
        email,
+       full_name,
        password_hash,
        role,
        staff_status,
        must_reset_password,
        created_by_user_id
      )
-     values ($1, $2, 'user', 'pending_approval', true, $3)
+     values ($1, $2, $3, 'user', 'pending_approval', true, $4)
      returning
        id,
        email,
+       full_name,
+       phone,
        role,
        staff_status,
        must_reset_password,
@@ -489,7 +564,7 @@ async function ensurePendingTargetUser({ email, requestedByUserId }, client) {
        activated_at,
        created_at,
        updated_at`,
-    [email, passwordHash, requestedByUserId]
+    [email, fullName || null, passwordHash, requestedByUserId]
   );
 
   return result.rows[0];
@@ -521,15 +596,32 @@ app.get("/health", (req, res) => {
 app.post(
   "/register",
   asyncHandler(async (req, res) => {
-    const { password } = req.body;
-    const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    const email = normalizeEmail(req.body.email);
+    const fullName = normalizeRequiredString(req.body.name || req.body.full_name, "full_name", 255);
+    const phone = normalizePhone(req.body.phone || req.body.phone_number, "phone");
+    const password = typeof req.body.password === "string" ? req.body.password : "";
+    const confirmPassword =
+      typeof req.body.confirmPassword === "string"
+        ? req.body.confirmPassword
+        : typeof req.body.confirm_password === "string"
+          ? req.body.confirm_password
+          : null;
+
     const requestedRole = typeof req.body.role === "string" ? req.body.role.trim() : null;
 
-    if (!isValidEmail(email) || !password) {
+    if (!password) {
       return res.status(400).json({
         error: "A valid email and password are required"
       });
     }
+
+    if (confirmPassword !== null && password !== confirmPassword) {
+      return res.status(400).json({
+        error: "Password and confirmation password must match"
+      });
+    }
+
+    assertStrongPassword(password);
 
     if (requestedRole && requestedRole !== "user") {
       await auditSecurityEvent("UNAUTHORIZED_STAFF_CREATION_ATTEMPT", {
@@ -545,6 +637,10 @@ app.post(
           target_email: email,
           requested_role: requestedRole
         }
+      });
+
+      return res.status(403).json({
+        error: "Public registration can only create standard user accounts"
       });
     }
 
@@ -562,11 +658,45 @@ app.post(
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const result = await query(
-      `insert into public.users (email, password_hash, role, staff_status, must_reset_password)
-       values ($1, $2, 'user', 'active', false)
-       returning id, email, role, staff_status, must_reset_password, created_at, updated_at`,
-      [email, hashedPassword]
+      `insert into public.users (
+         email,
+         full_name,
+         phone,
+         password_hash,
+         role,
+         staff_status,
+         must_reset_password
+       )
+       values ($1, $2, $3, $4, 'user', 'active', false)
+       returning
+         id,
+         email,
+         full_name,
+         phone,
+         role,
+         staff_status,
+         must_reset_password,
+         created_at,
+         updated_at`,
+      [email, fullName, phone, hashedPassword]
     );
+
+    await auditSecurityEvent("USER_REGISTERED", {
+      actor_user_id: result.rows[0].id,
+      actor_role: "user",
+      action: "Public user account registered",
+      resource_type: "user",
+      resource_id: result.rows[0].id,
+      endpoint: "/register",
+      method: "POST",
+      status: "created",
+      status_code: 201,
+      metadata: {
+        email,
+        has_full_name: Boolean(fullName),
+        has_phone: Boolean(phone)
+      }
+    });
 
     return res.status(201).json({
       message: "User registered successfully",
@@ -588,7 +718,17 @@ app.post(
     }
 
     const result = await query(
-      `select id, email, password_hash, role, staff_status, must_reset_password, created_at, updated_at
+      `select
+         id,
+         email,
+         full_name,
+         phone,
+         password_hash,
+         role,
+         staff_status,
+         must_reset_password,
+         created_at,
+         updated_at
        from public.users
        where email = $1
        limit 1`,
@@ -649,7 +789,16 @@ app.get(
       const decoded = jwt.verify(token, JWT_SECRET);
       const userId = decoded.sub || decoded.id;
       const result = await query(
-        `select id, email, role, staff_status, must_reset_password, created_at, updated_at
+        `select
+           id,
+           email,
+           full_name,
+           phone,
+           role,
+           staff_status,
+           must_reset_password,
+           created_at,
+           updated_at
          from public.users
          where id = $1
          limit 1`,
@@ -737,7 +886,8 @@ app.post(
       const targetUser = await ensurePendingTargetUser(
         {
           email: targetEmail,
-          requestedByUserId
+          requestedByUserId,
+          fullName: targetFullName
         },
         client
       );
@@ -909,7 +1059,6 @@ app.get(
     });
   })
 );
-
 app.post(
   "/staff/onboarding/requests/:id/approve",
   asyncHandler(async (req, res) => {
@@ -1040,6 +1189,7 @@ app.post(
          and decision = 'approved'`,
         [request.id]
       );
+
       const approvalCount = approvalCountResult.rows[0].approval_count;
       activated = leaderOverride || approvalCount >= request.required_approvals;
 
@@ -1384,14 +1534,15 @@ app.get(
       throw new ApiError(404, "User not found");
     }
 
-    const isActiveStaff = user.staff_status === "active" && staffRoles.includes(user.role);
+    const isActiveStaffAccount =
+      user.staff_status === "active" && staffRoles.includes(user.role);
 
     return res.json({
       id: user.id,
       role: user.role,
       staff_status: user.staff_status,
-      is_active_staff: isActiveStaff,
-      can_verify_tickets: isActiveStaff && user.role === "gate_staff"
+      is_active_staff: isActiveStaffAccount,
+      can_verify_tickets: isActiveStaffAccount && user.role === "gate_staff"
     });
   })
 );
@@ -1429,7 +1580,7 @@ app.use((error, req, res, next) => {
 
   if (error.code === "42P01" || error.code === "42703") {
     return res.status(503).json({
-      error: "Auth database schema is not ready. Apply the Phase 10.5 auth migration."
+      error: "Auth database schema is not ready. Apply the public profile fields migration."
     });
   }
 
