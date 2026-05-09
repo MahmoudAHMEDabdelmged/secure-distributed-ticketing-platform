@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ApiClientError,
   ApiEnvelope,
@@ -171,6 +171,13 @@ type Incident = {
   last_detected_at?: string;
 };
 
+type EligibleGateStaff = {
+  id: string;
+  email: string;
+  name: string;
+  staff_status?: string;
+};
+
 // Using APP_NAME from branding.ts
 
 function getRoleLabel(role: unknown) {
@@ -181,6 +188,7 @@ function getRoleLabel(role: unknown) {
     admin: "Admin",
     organizer: "Organizer",
     security: "Security",
+    staff: "Gate Staff",
     system_admin: "System Admin",
   };
 
@@ -314,6 +322,7 @@ export function AppExperience({
   const [unreadCount, setUnreadCount] = useState(0);
   const [staffEvents, setStaffEvents] = useState<StaffEventAssignment[]>([]);
   const [gateAssignments, setGateAssignments] = useState<GateAssignment[]>([]);
+  const [eligibleGateStaff, setEligibleGateStaff] = useState<EligibleGateStaff[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [monitoringSummary, setMonitoringSummary] = useState<Record<string, unknown> | null>(null);
@@ -811,6 +820,16 @@ export function AppExperience({
   async function loadGateAssignments(eventId: string) {
     const payload = await apiRequest<ApiEnvelope<GateAssignment[]>>(`/events/${encodeURIComponent(eventId)}/gate-staff/assignments`);
     setGateAssignments(safeArray<GateAssignment>(extractData(payload)));
+  }
+
+  async function loadEligibleGateStaff(eventId: string) {
+    try {
+      const payload = await apiRequest<ApiEnvelope<EligibleGateStaff[]>>(`/events/${encodeURIComponent(eventId)}/gate-staff/eligible`);
+      setEligibleGateStaff(safeArray<EligibleGateStaff>(extractData(payload)));
+    } catch (error) {
+      console.warn("Failed to load eligible gate staff:", error);
+      setEligibleGateStaff([]);
+    }
   }
 
   async function loadMyGateCode(eventId: string) {
@@ -1549,6 +1568,15 @@ export function AppExperience({
   }
 
   function renderAdminGate() {
+    const handleEventChange = (e: ChangeEvent<HTMLSelectElement>) => {
+      const eventId = e.currentTarget.value;
+      if (eventId) {
+        void loadEligibleGateStaff(eventId);
+      } else {
+        setEligibleGateStaff([]);
+      }
+    };
+
     return (
       <section className="content-stack">
         <div className="section-header">
@@ -1559,16 +1587,29 @@ export function AppExperience({
           <button type="button" onClick={() => void loadEvents(true)}>Load all events</button>
         </div>
         <form className="panel form-grid" onSubmit={(event) => void assignGateStaff(event)}>
-          <select name="event_id" required>
+          <select name="event_id" required onChange={handleEventChange}>
             <option value="">Select event</option>
             {events.map((event) => (
               <option key={event.id} value={event.id}>{event.title}</option>
             ))}
           </select>
-          <input name="staff_user_id" placeholder="Gate staff user UUID" required />
+          {eligibleGateStaff.length > 0 ? (
+            <select name="staff_user_id" required>
+              <option value="">Select gate staff member</option>
+              {eligibleGateStaff.map((staff) => (
+                <option key={staff.id} value={staff.id}>
+                  {staff.name} — {staff.email}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <div style={{ padding: "10px", backgroundColor: "#f5f5f5", borderRadius: "4px", color: "#666" }}>
+              No available gate staff for this event time.
+            </div>
+          )}
           <input name="code_active_from" type="datetime-local" aria-label="Code active from" />
           <input name="code_expires_at" type="datetime-local" aria-label="Code expires at" />
-          <button className="primary-button" type="submit" disabled={loading}>Assign gate staff</button>
+          <button className="primary-button" type="submit" disabled={loading || eligibleGateStaff.length === 0}>Assign gate staff</button>
         </form>
         <div className="event-grid">
           {events.slice(0, 6).map((event) => (
@@ -1660,7 +1701,7 @@ export function AppExperience({
             ["Role", user ? getRoleLabel(user.role) : "Not logged in"],
             ["Gate events", staffEvents.length],
             ["Staff status", user?.staff_status || "unknown"],
-            ["Gate access", userRole === "security" ? "enabled" : "not staff role"]
+            ["Gate access", userRole === "staff" ? "enabled" : "not staff role"]
           ]}
         />
         <div className="button-row">

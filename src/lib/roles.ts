@@ -27,6 +27,7 @@ export type NormalizedRole =
   | "admin"
   | "organizer"
   | "security"
+  | "staff"
   | "system_admin";
 
 export interface NavigationItem {
@@ -67,9 +68,9 @@ export function normalizeRole(role: unknown): NormalizedRole | null {
     security: "security",
     security_staff: "security",
     security_leader: "system_admin",
-    staff: "security",
-    gate_staff: "security",
-    regular_employee: "security",
+    staff: "staff",
+    gate_staff: "staff",
+    regular_employee: "staff",
 
     // System admin roles
     system_admin: "system_admin",
@@ -103,6 +104,10 @@ export function isSecurity(role: unknown): boolean {
   return normalizeRole(role) === "security";
 }
 
+export function isStaff(role: unknown): boolean {
+  return normalizeRole(role) === "staff";
+}
+
 export function isSystemAdmin(role: unknown): boolean {
   return normalizeRole(role) === "system_admin";
 }
@@ -120,6 +125,9 @@ export function getDefaultRouteForRole(role: unknown): string {
 
     case "security":
       return "/security";
+
+    case "staff":
+      return "/staff/events";
 
     case "system_admin":
       return "/distributed-systems";
@@ -165,6 +173,13 @@ export function getNavigationForRole(role: unknown): NavigationItem[] {
     { label: "Profile", href: "/profile" },
   ];
 
+  const staffNav: NavigationItem[] = [
+    { label: "Staff Dashboard", href: "/staff" },
+    { label: "My Gate Events", href: "/staff/events" },
+    { label: "Gate Scanner", href: "/staff/scanner" },
+    { label: "Profile", href: "/profile" },
+  ];
+
   const systemAdminNav: NavigationItem[] = [
     { label: "Admin Dashboard", href: "/admin" },
     { label: "Security Dashboard", href: "/security" },
@@ -183,6 +198,9 @@ export function getNavigationForRole(role: unknown): NavigationItem[] {
 
     case "security":
       return [...baseNav, ...securityNav];
+
+    case "staff":
+      return [...baseNav, ...staffNav];
 
     case "system_admin":
       return [...baseNav, ...systemAdminNav];
@@ -253,12 +271,12 @@ export function canAccessRoute(role: unknown, path: string): boolean {
     return normalized === "system_admin";
   }
 
-  // Staff operations for gate staff and security.
+  // Staff operations for gate staff only (not security staff).
   if (cleanPath === "/staff" || cleanPath.startsWith("/staff/")) {
-    return normalized === "security" || normalized === "system_admin";
+    return normalized === "staff" || normalized === "system_admin";
   }
 
-  // Monitoring is security/system-admin only.
+  // Monitoring is security/system-admin only (not gate staff).
   if (cleanPath === "/monitoring" || cleanPath.startsWith("/monitoring/")) {
     return (
       normalized === "security" ||

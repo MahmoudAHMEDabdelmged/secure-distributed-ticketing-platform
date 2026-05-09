@@ -443,8 +443,8 @@ function matchesEventGateCodeRoute(path) {
 function matchesEventGateStaffRoute(path) {
   return /^\/events\/gate-staff\/my-events\/?$/.test(path) ||
     /^\/api\/events\/gate-staff\/my-events\/?$/.test(path) ||
-    /^\/events\/[^/]+\/gate-staff\/(assignments|my-code|validate-code)\/?$/.test(path) ||
-    /^\/api\/events\/[^/]+\/gate-staff\/(assignments|my-code|validate-code)\/?$/.test(path) ||
+    /^\/events\/[^/]+\/gate-staff\/(assignments|assignments-with-users|eligible|my-code|validate-code)\/?$/.test(path) ||
+    /^\/api\/events\/[^/]+\/gate-staff\/(assignments|assignments-with-users|eligible|my-code|validate-code)\/?$/.test(path) ||
     /^\/events\/[^/]+\/gate-staff\/assignments\/[^/]+\/(rotate|revoke)\/?$/.test(path) ||
     /^\/api\/events\/[^/]+\/gate-staff\/assignments\/[^/]+\/(rotate|revoke)\/?$/.test(path);
 }

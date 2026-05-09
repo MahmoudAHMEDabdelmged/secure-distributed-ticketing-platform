@@ -808,6 +808,170 @@ async function fetchEventById(eventId, client = { query }) {
   return result.rows[0] || null;
 }
 
+/**
+ * Check if two events have overlapping time windows.
+ * Returns true if events overlap, false if they don't overlap.
+ */
+function doEventsOverlap(event1StartsAt, event1EndsAt, event2StartsAt, event2EndsAt) {
+  const start1 = new Date(event1StartsAt).getTime();
+  const end1 = new Date(event1EndsAt).getTime();
+  const start2 = new Date(event2StartsAt).getTime();
+  const end2 = new Date(event2EndsAt).getTime();
+
+  // Events overlap if one starts before the other ends
+  return start1 < end2 && start2 < end1;
+}
+
+/**
+ * Get a list of eligible gate staff users for an event.
+ * Returns active gate_staff users who don't have conflicting assignments.
+ */
+async function getEligibleGateStaffForEvent(eventId) {
+  const event = await fetchEventById(eventId);
+
+  if (!event) {
+    throw new ApiError(404, "Event not found");
+  }
+
+  // Get all active gate_staff users from auth service
+  const authResponse = await fetchWithTimeout(`${AUTH_SERVICE_URL}/staff/users?role=gate_staff&status=active`, {
+    method: "GET",
+    headers: {
+      "accept": "application/json"
+    },
+    timeoutMs: 5000
+  });
+
+  if (!authResponse.ok) {
+    throw new ApiError(503, "Auth Service unavailable");
+  }
+
+  const authPayload = await authResponse.json();
+  const allGateStaff = Array.isArray(authPayload.data) ? authPayload.data : [];
+
+  // Get all assignments for each gate staff and check for conflicts
+  const eligibleStaff = [];
+
+  for (const staffMember of allGateStaff) {
+    // Get all assignments for this staff member
+    const assignmentsResult = await query(
+      `select a.id, e.starts_at, e.ends_at
+       from public.event_gate_staff_assignments a
+       join public.events e on e.id = a.event_id
+       where a.staff_user_id = $1
+       and a.status != 'revoked'
+       and a.status != 'expired'`,
+      [staffMember.id]
+    );
+
+    // Check if any existing assignment conflicts with the target event
+    let hasConflict = false;
+    for (const assignment of assignmentsResult.rows) {
+      if (doEventsOverlap(event.starts_at, event.ends_at, assignment.starts_at, assignment.ends_at)) {
+        hasConflict = true;
+        break;
+      }
+    }
+
+    if (!hasConflict) {
+      eligibleStaff.push(staffMember);
+    }
+  }
+
+  return eligibleStaff;
+}
+
+/**
+ * Get assignments for an event with user information.
+ */
+async function getAssignmentsWithUserInfo(eventId) {
+  const result = await query(
+    `select a.id, a.event_id, a.staff_user_id, a.code_hint, a.code_active_from,
+            a.code_expires_at, a.status, a.failed_attempts, a.last_used_at,
+            a.last_failed_at, a.revoked_at, a.created_at, a.updated_at
+     from public.event_gate_staff_assignments a
+     where a.event_id = $1
+     order by a.created_at desc`,
+    [eventId]
+  );
+
+  // Fetch user information for each assignment from auth service
+  const assignmentsWithUsers = [];
+
+  for (const assignment of result.rows) {
+    try {
+      const userResponse = await fetchWithTimeout(`${AUTH_SERVICE_URL}/staff/users/${encodeURIComponent(assignment.staff_user_id)}`, {
+        method: "GET",
+        headers: {
+          "accept": "application/json"
+        },
+        timeoutMs: 3000
+      });
+
+      let userInfo = { id: assignment.staff_user_id, email: "unknown", name: "Unknown" };
+
+      if (userResponse.ok) {
+        const userData = await userResponse.json();
+        if (userData && userData.data) {
+          userInfo = {
+            id: userData.data.id || assignment.staff_user_id,
+            email: userData.data.email || "unknown",
+            name: userData.data.name || "Unknown"
+          };
+        }
+      }
+
+      assignmentsWithUsers.push({
+        ...assignment,
+        staff_user: userInfo
+      });
+    } catch (error) {
+      // If user fetch fails, still include the assignment with minimal info
+      assignmentsWithUsers.push({
+        ...assignment,
+        staff_user: {
+          id: assignment.staff_user_id,
+          email: "unknown",
+          name: "Unknown"
+        }
+      });
+    }
+  }
+
+  return assignmentsWithUsers;
+}
+
+/**
+ * Check if assigning a staff member to an event would create a schedule conflict.
+ */
+async function checkScheduleConflict(eventId, staffUserId) {
+  const event = await fetchEventById(eventId);
+
+  if (!event) {
+    throw new ApiError(404, "Event not found");
+  }
+
+  // Get all non-revoked assignments for this staff member
+  const assignmentsResult = await query(
+    `select a.id, e.starts_at, e.ends_at
+     from public.event_gate_staff_assignments a
+     join public.events e on e.id = a.event_id
+     where a.staff_user_id = $1
+     and a.status != 'revoked'
+     and a.status != 'expired'`,
+    [staffUserId]
+  );
+
+  // Check for any overlaps
+  for (const assignment of assignmentsResult.rows) {
+    if (doEventsOverlap(event.starts_at, event.ends_at, assignment.starts_at, assignment.ends_at)) {
+      return true; // Conflict exists
+    }
+  }
+
+  return false; // No conflict
+}
+
 app.get("/health", (req, res) => {
   res.json({
     service: "events-service",
@@ -1048,6 +1212,12 @@ app.post(
 
     if (req.body.staff_user_id === req.body.assigned_by_user_id) {
       throw new ApiError(400, "assigned_by_user_id cannot assign their own gate code");
+    }
+
+    // Check for schedule conflicts
+    const hasConflict = await checkScheduleConflict(req.params.eventId, req.body.staff_user_id);
+    if (hasConflict) {
+      throw new ApiError(409, "Gate staff member has a conflicting assignment at this time");
     }
 
     const window = computeGateCodeWindow(event, req.body);
@@ -1473,6 +1643,49 @@ app.post(
       message: "Gate staff assignment revoked",
       data: toGateStaffAssignment(assignment)
     });
+  })
+);
+
+app.get(
+  "/events/:eventId/gate-staff/eligible",
+  asyncHandler(async (req, res) => {
+    assertRequiredUuid(req.params.eventId, "eventId");
+
+    try {
+      const eligible = await getEligibleGateStaffForEvent(req.params.eventId);
+      return res.json({
+        data: eligible.map((staff) => ({
+          id: staff.id,
+          email: staff.email,
+          name: staff.name,
+          staff_status: staff.staff_status
+        }))
+      });
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw error;
+      }
+      throw new ApiError(500, "Failed to retrieve eligible gate staff");
+    }
+  })
+);
+
+app.get(
+  "/events/:eventId/gate-staff/assignments-with-users",
+  asyncHandler(async (req, res) => {
+    assertRequiredUuid(req.params.eventId, "eventId");
+
+    try {
+      const assignments = await getAssignmentsWithUserInfo(req.params.eventId);
+      return res.json({
+        data: assignments
+      });
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw error;
+      }
+      throw new ApiError(500, "Failed to retrieve assignments");
+    }
   })
 );
 
