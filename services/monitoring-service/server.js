@@ -1,4 +1,4 @@
-const express = require("express");
+﻿const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 require("dotenv").config();
@@ -27,9 +27,7 @@ const CHECK_INTERVAL_SECONDS = parseIntegerEnv(process.env.CHECK_INTERVAL_SECOND
 const ALERT_ON_DEGRADED = !["false", "0", "no"].includes(
   String(process.env.ALERT_ON_DEGRADED || "true").trim().toLowerCase()
 );
-const ENABLE_MONITORING_SCHEDULER = ["true", "1", "yes"].includes(
-  String(process.env.ENABLE_MONITORING_SCHEDULER || "false").trim().toLowerCase()
-);
+const ENABLE_MONITORING_SCHEDULER = false;
 const REQUEST_TIMEOUT_MS = 5000;
 const HIGH_LATENCY_MS = 2000;
 
@@ -1730,29 +1728,8 @@ app.use((error, req, res, next) => {
   });
 });
 
-let schedulerRunning = false;
-
-if (ENABLE_MONITORING_SCHEDULER) {
-  setInterval(async () => {
-    if (schedulerRunning) {
-      return;
-    }
-
-    schedulerRunning = true;
-
-    try {
-      await runMonitoringCycle();
-    } catch (error) {
-      console.error("Monitoring scheduler check failed:", {
-        message: error.message,
-        name: error.name,
-        code: error.code
-      });
-    } finally {
-      schedulerRunning = false;
-    }
-  }, CHECK_INTERVAL_SECONDS * 1000);
-}
+// Automatic monitoring scheduler disabled.
+// Monitoring checks must be triggered manually from the System Admin dashboard via POST /monitoring/checks/run.
 
 process.on("SIGINT", async () => {
   await closePool();
@@ -1767,3 +1744,4 @@ process.on("SIGTERM", async () => {
 app.listen(PORT, () => {
   console.log(`Monitoring Service running on port ${PORT}`);
 });
+

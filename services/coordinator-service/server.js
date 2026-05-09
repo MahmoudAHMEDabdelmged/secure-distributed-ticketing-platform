@@ -1257,15 +1257,69 @@ app.get(
 app.post(
   "/election/start",
   asyncHandler(async (req, res) => {
-    const candidateId = normalizeNodeId(req.body.candidate_id || NODE_ID);
     const result = await withTransaction(async (client) => {
       const nodes = await loadClusterNodes(client);
-      const candidate = nodes.find((node) => node.node_id === candidateId);
+      const requestedCandidateId = req.body.candidate_id ? normalizeNodeId(req.body.candidate_id) : null;
+      
+      // Check if current leader is crashed/unhealthy and clear if so
+      const currentLeader = await getHealthyLeader(client);
+      if (!currentLeader) {
+        // No healthy leader; check if there's a stale leader record that should be cleared
+        const staleLeaderResult = await runClientQuery(
+          client,
+          `select node_id, role, status from public.coordinator_nodes
+           where role = 'leader' and (status != 'healthy' or status = 'crashed')
+           limit 1`,
+          []
+        );
+        if (staleLeaderResult.rowCount > 0) {
+          const staleLeader = staleLeaderResult.rows[0];
+          // Clear stale leader by demoting to follower
+          await runClientQuery(
+            client,
+            `update public.coordinator_nodes
+             set role = 'follower'
+             where node_id = $1 and status != 'healthy'`,
+            [staleLeader.node_id]
+          );
+        }
+      }
 
+      // Select candidate: use requested, fallback to NODE_ID if healthy, or first healthy node
+      let candidateId = requestedCandidateId;
+      if (!candidateId) {
+        const candidate = nodes.find((node) => node.node_id === NODE_ID && isHealthyParticipant(node));
+        if (candidate) {
+          candidateId = NODE_ID;
+        } else {
+          // Auto-select first healthy node
+          const healthyNode = nodes.find(isHealthyParticipant);
+          if (!healthyNode) {
+            throw new ApiError(409, "No healthy coordinator nodes are available for election", {
+              message: "No healthy coordinator nodes are available for election",
+              available_nodes: nodes.map((n) => ({
+                node_id: n.node_id,
+                status: n.status,
+                role: n.role
+              }))
+            });
+          }
+          candidateId = healthyNode.node_id;
+        }
+      }
+
+      const candidate = nodes.find((node) => node.node_id === candidateId);
       if (!candidate || !isHealthyParticipant(candidate)) {
         throw new ApiError(409, "Candidate must be a healthy non-crashed node", {
           message: "Candidate must be a healthy non-crashed node",
-          candidate_id: candidateId
+          candidate_id: candidateId,
+          requested_candidate: requestedCandidateId || NODE_ID,
+          available_healthy_nodes: nodes.filter(isHealthyParticipant).map((n) => n.node_id),
+          all_nodes: nodes.map((n) => ({
+            node_id: n.node_id,
+            status: n.status,
+            role: n.role
+          }))
         });
       }
 
@@ -1366,12 +1420,16 @@ app.post(
         granted_votes: grantedVotes,
         quorum: math.quorum,
         result: won ? "leader_elected" : "election_failed",
-        new_leader: won ? candidateId : null
+        new_leader: won ? candidateId : null,
+        election_reason: requestedCandidateId ? "manual" : "auto-selected",
+        candidate_auto_selected: !requestedCandidateId
       };
     });
 
     return res.status(result.new_leader ? 201 : 409).json({
-      message: result.new_leader ? "Leader elected" : "Election failed without quorum",
+      message: result.new_leader 
+        ? `Leader elected: ${result.candidate} (term ${result.term})` 
+        : "Election failed: insufficient quorum",
       data: result
     });
   })

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
+import { APP_DESCRIPTION, APP_FULL_TITLE } from "../src/lib/branding";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -14,8 +15,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Secure Tickets",
-  description: "Secure distributed ticketing platform demo",
+  title: APP_FULL_TITLE,
+  description: APP_DESCRIPTION,
 };
 
 export default function RootLayout({

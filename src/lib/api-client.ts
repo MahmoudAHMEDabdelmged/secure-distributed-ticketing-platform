@@ -27,6 +27,7 @@ export type AuthSession = {
     id: string;
     email: string;
     role: string;
+    name?: string;
     staff_status?: string;
     must_reset_password?: boolean;
   } | null;
@@ -44,6 +45,15 @@ export class ApiClientError extends Error {
   }
 }
 
+const STORAGE_KEYS = {
+  token: "ezbook_token",
+  user: "ezbook_user",
+
+  // Backward compatibility with older localStorage keys.
+  legacyToken: "secure_tickets_token",
+  legacyUser: "secure_tickets_user",
+};
+
 export function getApiGatewayUrl() {
   const configuredUrl = process.env.NEXT_PUBLIC_API_GATEWAY_URL || "";
   return configuredUrl.replace(/\/+$/, "");
@@ -53,22 +63,27 @@ export function getStoredSession(): AuthSession {
   if (typeof window === "undefined") {
     return {
       token: null,
-      user: null
+      user: null,
     };
   }
 
   try {
-    const token = window.localStorage.getItem("secure_tickets_token");
-    const rawUser = window.localStorage.getItem("secure_tickets_user");
+    const token =
+      window.localStorage.getItem(STORAGE_KEYS.token) ||
+      window.localStorage.getItem(STORAGE_KEYS.legacyToken);
+
+    const rawUser =
+      window.localStorage.getItem(STORAGE_KEYS.user) ||
+      window.localStorage.getItem(STORAGE_KEYS.legacyUser);
 
     return {
       token,
-      user: rawUser ? JSON.parse(rawUser) : null
+      user: rawUser ? JSON.parse(rawUser) : null,
     };
   } catch {
     return {
       token: null,
-      user: null
+      user: null,
     };
   }
 }
@@ -79,15 +94,19 @@ export function storeSession(session: AuthSession) {
   }
 
   if (session.token) {
-    window.localStorage.setItem("secure_tickets_token", session.token);
+    window.localStorage.setItem(STORAGE_KEYS.token, session.token);
+    window.localStorage.removeItem(STORAGE_KEYS.legacyToken);
   } else {
-    window.localStorage.removeItem("secure_tickets_token");
+    window.localStorage.removeItem(STORAGE_KEYS.token);
+    window.localStorage.removeItem(STORAGE_KEYS.legacyToken);
   }
 
   if (session.user) {
-    window.localStorage.setItem("secure_tickets_user", JSON.stringify(session.user));
+    window.localStorage.setItem(STORAGE_KEYS.user, JSON.stringify(session.user));
+    window.localStorage.removeItem(STORAGE_KEYS.legacyUser);
   } else {
-    window.localStorage.removeItem("secure_tickets_user");
+    window.localStorage.removeItem(STORAGE_KEYS.user);
+    window.localStorage.removeItem(STORAGE_KEYS.legacyUser);
   }
 }
 
@@ -121,7 +140,10 @@ function readErrorMessage(payload: unknown, fallback: string) {
   return fallback;
 }
 
-export async function apiRequest<T = unknown>(path: string, options: ApiRequestOptions = {}): Promise<T> {
+export async function apiRequest<T = unknown>(
+  path: string,
+  options: ApiRequestOptions = {},
+): Promise<T> {
   const baseUrl = getApiGatewayUrl();
 
   if (!baseUrl) {
@@ -131,7 +153,7 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
   const session = getStoredSession();
   const headers: Record<string, string> = {
     accept: "application/json",
-    ...options.headers
+    ...options.headers,
   };
 
   if (options.body !== undefined) {
@@ -142,11 +164,14 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
     headers.authorization = `Bearer ${session.token}`;
   }
 
-  const response = await fetch(`${baseUrl}${path}${buildQueryString(options.query)}`, {
-    method: options.method || "GET",
-    headers,
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined
-  });
+  const response = await fetch(
+    `${baseUrl}${path}${buildQueryString(options.query)}`,
+    {
+      method: options.method || "GET",
+      headers,
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+    },
+  );
 
   const contentType = response.headers.get("content-type") || "";
   const payload = contentType.includes("application/json")
@@ -154,7 +179,11 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
     : await response.text();
 
   if (!response.ok) {
-    throw new ApiClientError(response.status, readErrorMessage(payload, "Request failed"), payload);
+    throw new ApiClientError(
+      response.status,
+      readErrorMessage(payload, "Request failed"),
+      payload,
+    );
   }
 
   return payload as T;
@@ -166,4 +195,4 @@ export function extractData<T>(payload: ApiEnvelope<T> | T): T {
   }
 
   return payload as T;
-}
+} 

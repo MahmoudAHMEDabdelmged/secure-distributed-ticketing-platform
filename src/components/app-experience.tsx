@@ -1,6 +1,7 @@
-"use client";
+﻿"use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ApiClientError,
@@ -13,6 +14,14 @@ import {
   type AuthSession
 } from "@/src/lib/api-client";
 import { useTheme, type ThemeChoice } from "@/src/lib/theme";
+import { APP_NAME } from "@/src/lib/branding";
+import {
+  normalizeRole,
+  getDefaultRouteForRole,
+  getNavigationForRole,
+  canAccessRoute,
+  type NavigationItem,
+} from "@/src/lib/roles";
 
 export type ViewName =
   | "home"
@@ -162,16 +171,49 @@ type Incident = {
   last_detected_at?: string;
 };
 
-const roleLabels: Record<string, string> = {
-  user: "User",
-  regular_employee: "Employee",
-  gate_staff: "Gate Staff",
-  admin: "Admin",
-  security_staff: "Security",
-  security_leader: "Security Leader"
-};
+// Using APP_NAME from branding.ts
 
-const appName = process.env.NEXT_PUBLIC_APP_NAME || "Secure Tickets";
+function getRoleLabel(role: unknown) {
+  const normalized = normalizeRole(role);
+
+  const labels: Record<string, string> = {
+    user: "User",
+    admin: "Admin",
+    organizer: "Organizer",
+    security: "Security",
+    system_admin: "System Admin",
+  };
+
+  return normalized ? labels[normalized] || "User" : "Guest";
+}
+
+function pathForView(view: ViewName, resourceId?: string) {
+  const encodedResource = resourceId ? encodeURIComponent(resourceId) : "";
+
+  const paths: Record<ViewName, string> = {
+    home: "/",
+    events: "/events",
+    "event-detail": encodedResource ? `/events/${encodedResource}` : "/events",
+    login: "/login",
+    register: "/register",
+    booking: "/booking",
+    payment: "/payment",
+    tickets: "/tickets",
+    "ticket-detail": encodedResource ? `/tickets/${encodedResource}` : "/tickets",
+    notifications: "/notifications",
+    admin: "/admin",
+    "admin-gate": "/admin/gate-assignments",
+    security: "/security",
+    monitoring: "/monitoring",
+    "monitoring-incident": "/monitoring",
+    staff: "/staff",
+    "staff-events": "/staff/events",
+    "staff-event-panel": encodedResource ? `/staff/events/${encodedResource}` : "/staff/events",
+    "staff-scanner": "/staff/scanner",
+  };
+
+  return paths[view] || "/";
+}
 
 function formatDate(value?: string | null) {
   if (!value) {
@@ -254,8 +296,13 @@ export function AppExperience({
   initialView: ViewName;
   resourceId?: string;
 }) {
+  const router = useRouter();
   const { theme, resolvedTheme, setTheme } = useTheme();
-  const [session, setSession] = useState<AuthSession>(() => getStoredSession());
+  const [hasHydrated, setHasHydrated] = useState(false);
+  const [session, setSession] = useState<AuthSession>({
+    token: null,
+    user: null,
+  });
   const [events, setEvents] = useState<TicketEvent[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<TicketEvent | null>(null);
   const [selectedSectionId, setSelectedSectionId] = useState("");
@@ -277,14 +324,65 @@ export function AppExperience({
   const [loading, setLoading] = useState(false);
   const [manualQrToken, setManualQrToken] = useState("");
   const [manualGateCode, setManualGateCode] = useState("");
-  const [paymentCardNumber, setPaymentCardNumber] = useState("4242424242424242");
+  const [paymentCardNumber, setPaymentCardNumber] = useState("");
   const [activeGateCode, setActiveGateCode] = useState("");
   const [scannerResult, setScannerResult] = useState<Record<string, unknown> | null>(null);
+  const [showNotificationsDropdown, setShowNotificationsDropdown] = useState(false);
+  const [registerPassword, setRegisterPassword] = useState("");
+  const [registerConfirmPassword, setRegisterConfirmPassword] = useState("");
+  const [registerAttempted, setRegisterAttempted] = useState(false);
 
-  const user = session.user;
-  const isAdmin = user?.role === "admin" || user?.role === "security_leader";
-  const isSecurity = user?.role === "security_staff" || user?.role === "security_leader";
-  const isGateStaff = user?.role === "gate_staff";
+  const user = hasHydrated ? session.user : null;
+  const userRole = user ? normalizeRole(user.role) : null;
+
+  const registerPasswordRules = useMemo(
+    () => [
+      {
+        id: "length",
+        label: "At least 8 characters",
+        valid: registerPassword.length >= 8,
+      },
+      {
+        id: "uppercase",
+        label: "At least one uppercase letter",
+        valid: /[A-Z]/.test(registerPassword),
+      },
+      {
+        id: "lowercase",
+        label: "At least one lowercase letter",
+        valid: /[a-z]/.test(registerPassword),
+      },
+      {
+        id: "number",
+        label: "At least one number",
+        valid: /\d/.test(registerPassword),
+      },
+      {
+        id: "symbol",
+        label: "At least one symbol",
+        valid: /[^A-Za-z0-9]/.test(registerPassword),
+      },
+      {
+        id: "match",
+        label: "Password and confirmation must match exactly",
+        valid:
+          registerPassword.length > 0 &&
+          registerConfirmPassword.length > 0 &&
+          registerPassword === registerConfirmPassword,
+      },
+    ],
+    [registerPassword, registerConfirmPassword],
+  );
+
+  const isRegisterPasswordValid = registerPasswordRules.every((rule) => rule.valid);
+  
+  // Role-based checks
+  const isAdmin = userRole === "admin" || userRole === "organizer" || userRole === "system_admin";
+  const isSecurity = userRole === "security" || userRole === "system_admin";
+  const currentPath = pathForView(initialView, resourceId);
+  const canViewCurrentPage = hasHydrated
+    ? canAccessRoute(userRole, currentPath)
+    : true;
 
   const selectedTicket = useMemo(() => {
     if (!resourceId) {
@@ -403,28 +501,46 @@ export function AppExperience({
   useEffect(() => {
     const timeout = window.setTimeout(() => {
       const storedSession = getStoredSession();
-      void loadEvents(initialView === "admin" || initialView === "admin-gate");
-      void loadTickets(storedSession.user?.id);
-      void loadNotifications(storedSession.user);
-      void loadStaffEvents(storedSession.user?.role === "gate_staff" ? storedSession.user.id : undefined);
+      setSession(storedSession);
+      setHasHydrated(true);
+
+      const shouldLoadEvents = [
+        "home",
+        "events",
+        "event-detail",
+        "admin",
+        "admin-gate",
+        "booking",
+      ].includes(initialView);
+
+      if (shouldLoadEvents) {
+        void loadEvents(initialView === "admin" || initialView === "admin-gate").catch((error) =>
+          notify(getErrorMessage(error), "warning"),
+        );
+      }
+
+      if (storedSession.user?.id) {
+        void loadTickets(storedSession.user.id).catch((error) =>
+          notify(getErrorMessage(error), "warning"),
+        );
+        void loadNotifications(storedSession.user).catch((error) =>
+          notify(getErrorMessage(error), "warning"),
+        );
+      }
+
+      if (storedSession.user?.role === "gate_staff") {
+        void loadStaffEvents(storedSession.user.id).catch((error) =>
+          notify(getErrorMessage(error), "warning"),
+        );
+      }
     }, 0);
 
     return () => window.clearTimeout(timeout);
-  }, [initialView, loadEvents, loadNotifications, loadStaffEvents, loadTickets]);
+  }, [initialView, loadEvents, loadNotifications, loadStaffEvents, loadTickets, notify]);
 
-  useEffect(() => {
-    const timeout = window.setTimeout(() => {
-    if (initialView === "monitoring" || initialView === "monitoring-incident") {
-      void loadMonitoring().catch((error) => notify(getErrorMessage(error), "critical"));
-    }
-
-    if (initialView === "security") {
-      void loadSecurity().catch((error) => notify(getErrorMessage(error), "critical"));
-    }
-    }, 0);
-
-    return () => window.clearTimeout(timeout);
-  }, [initialView, loadMonitoring, loadSecurity, notify]);
+  // Security and monitoring dashboards are intentionally manual-only.
+  // They do not run checks or load operational data automatically on page open.
+  // Use the Refresh buttons inside each dashboard when needed.
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -446,12 +562,20 @@ export function AppExperience({
 
       storeSession(nextSession);
       setSession(nextSession);
+      
+      // Determine role and redirect accordingly
+      const userRole = payload.user ? normalizeRole(payload.user.role) : null;
+      const redirectUrl = getDefaultRouteForRole(userRole);
+      
       await Promise.all([
         loadTickets(payload.user?.id),
         loadNotifications(payload.user),
         loadStaffEvents(payload.user?.role === "gate_staff" ? payload.user.id : undefined)
       ]);
       notify("Login successful", "success");
+      
+      // Redirect to role-appropriate page
+      router.push(redirectUrl);
     } catch (error) {
       notify(getErrorMessage(error), "critical");
     } finally {
@@ -461,18 +585,51 @@ export function AppExperience({
 
   async function handleRegister(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setRegisterAttempted(true);
+
+    const form = new FormData(event.currentTarget);
+    const fullName = String(form.get("full_name") || "").trim();
+    const email = String(form.get("email") || "").trim().toLowerCase();
+    const phone = String(form.get("phone") || "").trim();
+    const password = String(form.get("password") || "");
+    const confirmPassword = String(form.get("confirm_password") || "");
+
+    if (!fullName || !email || !phone) {
+      notify("Please complete your full name, email, and phone number.", "critical");
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      notify("Password and confirmation password must match exactly.", "critical");
+      return;
+    }
+
+    if (!isRegisterPasswordValid) {
+      notify("Please complete all password requirements before creating your account.", "critical");
+      return;
+    }
+
     setLoading(true);
 
     try {
-      const form = new FormData(event.currentTarget);
       await apiRequest("/auth/register", {
         method: "POST",
         body: {
-          email: String(form.get("email") || ""),
-          password: String(form.get("password") || "")
+          name: fullName,
+          full_name: fullName,
+          email,
+          phone,
+          phone_number: phone,
+          password,
+          role: "user",
         }
       });
+
       notify("Registration successful. You can log in now.", "success");
+      setRegisterPassword("");
+      setRegisterConfirmPassword("");
+      setRegisterAttempted(false);
+      router.push("/login");
     } catch (error) {
       notify(getErrorMessage(error), "critical");
     } finally {
@@ -520,7 +677,8 @@ export function AppExperience({
       });
       const booking = extractData(payload);
       setCurrentBooking(booking);
-      window.localStorage.setItem("secure_tickets_booking", JSON.stringify(booking));
+      window.localStorage.setItem("ezbook_booking", JSON.stringify(booking));
+      window.localStorage.removeItem("secure_tickets_booking");
       notify("Booking created. Continue to payment.", "success");
     } catch (error) {
       notify(getErrorMessage(error), "critical");
@@ -539,7 +697,11 @@ export function AppExperience({
 
     const booking = currentBooking || (() => {
       try {
-        return JSON.parse(window.localStorage.getItem("secure_tickets_booking") || "null") as Booking | null;
+        return JSON.parse(
+          window.localStorage.getItem("ezbook_booking") ||
+          window.localStorage.getItem("secure_tickets_booking") ||
+          "null"
+        ) as Booking | null;
       } catch {
         return null;
       }
@@ -582,7 +744,7 @@ export function AppExperience({
       } else if (payment.status === "suspicious") {
         notify("Payment was marked suspicious. Security review notification was created by the backend flow when configured.", "warning");
       } else {
-        notify(payment.failure_reason || "Payment failed. Try another simulated card.", "critical");
+        notify(payment.failure_reason || "Payment failed. Please check the payment details and try again.", "critical");
       }
     } catch (error) {
       notify(getErrorMessage(error), "critical");
@@ -731,27 +893,27 @@ export function AppExperience({
     notify("Incident resolved", "success");
   }
 
+  if (!hasHydrated) {
+    return renderLoadingShell();
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <Link className="brand" href="/">
-          <span className="brand-mark">ST</span>
+          <span className="brand-mark">EZ</span>
           <span>
-            <strong>{appName}</strong>
-            <small>distributed security demo</small>
+            <strong>{APP_NAME}</strong>
+            <small>Secure Ticketing</small>
           </span>
         </Link>
 
         <nav className="nav-list" aria-label="Primary navigation">
-          <Link href="/">Home</Link>
-          <Link href="/events">Events</Link>
-          <Link href="/tickets">My Tickets</Link>
-          <Link href="/notifications">Notifications</Link>
-          <Link href="/admin">Admin</Link>
-          <Link href="/security">Security</Link>
-          <Link href="/monitoring">Monitoring</Link>
-          <Link href="/distributed-systems">Distributed Systems</Link>
-          <Link href="/staff">Staff</Link>
+          {getNavigationForRole(userRole).map((item: NavigationItem) => (
+            <Link key={item.href} href={item.href}>
+              {item.label}
+            </Link>
+          ))}
         </nav>
 
         <div className="sidebar-footer">
@@ -772,21 +934,66 @@ export function AppExperience({
       <main className="main-panel">
         <header className="topbar">
           <div>
-            <p className="eyebrow">API Gateway only</p>
+            <p className="eyebrow">{APP_NAME}</p>
             <h1>{titleForView(initialView)}</h1>
           </div>
           <div className="topbar-actions">
             <span className={`api-status ${getApiGatewayUrl() ? "ok" : "missing"}`}>
-              {getApiGatewayUrl() ? "Gateway configured" : "Gateway missing"}
+              {getApiGatewayUrl() ? "Gateway OK" : "Gateway missing"}
             </span>
-            <Link className="bell" href="/notifications" title="Open notifications">
-              Notifications
-              {unreadCount > 0 ? <span>{unreadCount}</span> : null}
-            </Link>
+            
+            {/* Notifications dropdown - top right */}
+            <div className="notification-dropdown-wrapper">
+              <button
+                className="bell-button"
+                onClick={() => setShowNotificationsDropdown(!showNotificationsDropdown)}
+                title="Notifications"
+                aria-label="Notifications"
+              >
+                <span className="bell-icon">🔔</span>
+                {unreadCount > 0 ? <span className="badge">{unreadCount}</span> : null}
+              </button>
+              
+              {showNotificationsDropdown && (
+                <div className="notification-dropdown">
+                  <div className="dropdown-header">
+                    <h3>Notifications</h3>
+                    <button
+                      type="button"
+                      className="close-button"
+                      onClick={() => setShowNotificationsDropdown(false)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <div className="dropdown-content">
+                    {notifications.length > 0 ? (
+                      notifications.slice(0, 5).map((notif) => (
+                        <div key={notif.id} className="notification-item-compact">
+                          <span className="severity-badge" data-severity={notif.severity}>
+                            {notif.severity}
+                          </span>
+                          <div>
+                            <p>{notif.title}</p>
+                            <small>{notif.message}</small>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="empty-message">No notifications</p>
+                    )}
+                  </div>
+                  <div className="dropdown-footer">
+                    <Link href="/notifications">View all notifications</Link>
+                  </div>
+                </div>
+              )}
+            </div>
+            
             {user ? (
               <div className="user-chip">
                 <span>{user.email}</span>
-                <strong>{roleLabels[user.role] || user.role}</strong>
+                <strong>{getRoleLabel(user.role)}</strong>
                 <button type="button" onClick={logout}>Logout</button>
               </div>
             ) : (
@@ -805,7 +1012,53 @@ export function AppExperience({
     </div>
   );
 
+  function renderLoadingShell() {
+    return (
+      <div className="app-shell">
+        <aside className="sidebar">
+          <Link className="brand" href="/">
+            <span className="brand-mark">EZ</span>
+            <span>
+              <strong>{APP_NAME}</strong>
+              <small>Book it EZ</small>
+            </span>
+          </Link>
+        </aside>
+        <main className="main-panel">
+          <section className="empty-state">
+            <p className="eyebrow">Loading</p>
+            <h2>Preparing your EZbook experience</h2>
+            <p>Please wait while we load your session and dashboard.</p>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  function renderAccessDenied() {
+    const targetRoute = user ? getDefaultRouteForRole(userRole) : "/login";
+
+    return (
+      <section className="large-panel access-denied-panel">
+        <p className="eyebrow">{APP_NAME}</p>
+        <h2>Access denied</h2>
+        <p>
+          {user
+            ? "You do not have permission to view this page."
+            : "Please log in to continue."}
+        </p>
+        <Link className="primary-button" href={targetRoute}>
+          {user ? "Go to my dashboard" : "Go to login"}
+        </Link>
+      </section>
+    );
+  }
+
   function renderView() {
+    if (!canViewCurrentPage) {
+      return renderAccessDenied();
+    }
+
     switch (initialView) {
       case "events":
         return renderEventsList();
@@ -850,22 +1103,30 @@ export function AppExperience({
     return (
       <section className="hero-section">
         <div className="hero-copy">
-          <p className="eyebrow">Secure distributed ticketing</p>
-          <h2>Book events, issue QR tickets, and govern gate access from one demo surface.</h2>
+          <p className="eyebrow">{APP_NAME}</p>
+          <h2>Secure Event Ticketing Made Simple</h2>
           <p>
-            The frontend talks only to the API Gateway. Staff flows, monitoring, audit logs, and
-            time-bound gate codes stay behind service APIs.
+            Book tickets for your favorite events, manage your bookings, and enjoy seamless access control.
+            All powered by secure, distributed infrastructure.
           </p>
           <div className="button-row">
-            <Link className="primary-button" href="/events">Browse events</Link>
-            <Link className="secondary-button" href="/monitoring">Open monitoring</Link>
-            <Link className="secondary-button" href="/distributed-systems">Open consensus demo</Link>
+            {!user ? (
+              <>
+                <Link className="primary-button" href="/events">Browse Events</Link>
+                <Link className="secondary-button" href="/login">Sign In</Link>
+              </>
+            ) : (
+              <>
+                <Link className="primary-button" href="/events">Browse Events</Link>
+                <Link className="secondary-button" href="/booking">My Bookings</Link>
+              </>
+            )}
           </div>
         </div>
         <div className="hero-visual" aria-hidden="true">
           <div className="ticket-visual">
-            <span>SECURE PASS</span>
-            <strong>QR + staff code</strong>
+            <span>{APP_NAME}</span>
+            <strong>Secure Ticketing</strong>
             <div className="qr-grid">
               {Array.from({ length: 25 }).map((_, index) => (
                 <i key={index} className={index % 3 === 0 || index % 7 === 0 ? "on" : ""} />
@@ -896,7 +1157,7 @@ export function AppExperience({
               <div>
                 <p className="eyebrow">{event.venue?.city || "Venue pending"}</p>
                 <h3>{event.title}</h3>
-                <p>{event.description || "Secure ticketing demo event."}</p>
+                <p>{event.description || "Secure ticketing event."}</p>
               </div>
               <div className="card-footer">
                 <span>{formatDate(event.starts_at)}</span>
@@ -984,10 +1245,10 @@ export function AppExperience({
       <section className="content-stack">
         <div className="detail-layout">
           <article className="panel">
-            <p className="eyebrow">Payment simulation</p>
+            <p className="eyebrow">Secure payment</p>
             <h2>{booking ? booking.event_title : "No booking selected"}</h2>
             <p>
-              Payment status stays in-site. The app does not send payment status email.
+              Submit a payment for the selected booking. Test scenarios are controlled from the System Admin dashboard only.
             </p>
             {booking ? (
               <dl className="detail-grid">
@@ -999,18 +1260,14 @@ export function AppExperience({
             ) : null}
           </article>
           <form className="panel form-stack" onSubmit={(event) => void simulatePayment(event)}>
-            <h3>Simulated card</h3>
+            <h3>Card details</h3>
             <input
               name="card_number"
               value={paymentCardNumber}
               onChange={(input) => setPaymentCardNumber(input.target.value)}
               aria-label="Card number"
+              placeholder="Enter card number"
             />
-            <div className="button-row">
-              <button type="button" onClick={() => setPaymentCardNumber("4242424242424242")}>4242 success</button>
-              <button type="button" onClick={() => setPaymentCardNumber("4000000000004000")}>4000 failed</button>
-              <button type="button" onClick={() => setPaymentCardNumber("9999999999999999")}>9999 suspicious</button>
-            </div>
             <button className="primary-button" disabled={loading || !booking} type="submit">Submit payment</button>
           </form>
         </div>
@@ -1034,7 +1291,7 @@ export function AppExperience({
           <button type="button" onClick={() => void loadTickets(user?.id)}>Refresh</button>
         </div>
         {tickets.length === 0 ? (
-          <EmptyState title="No tickets yet" message="Complete a booking and successful 4242 payment to issue tickets." />
+          <EmptyState title="No tickets yet" message="Complete a booking and successful payment to issue tickets." />
         ) : (
           <div className="ticket-list">
             {tickets.map((ticket) => (
@@ -1063,7 +1320,7 @@ export function AppExperience({
         <article className="large-panel">
           <p className="eyebrow">Ticket QR</p>
           <h2>{ticket.event_title || "Ticket"}</h2>
-          <p>{ticket.section_name || "Section"} · {ticket.ticket_number || ticket.id}</p>
+          <p>{ticket.section_name || "Section"} Â· {ticket.ticket_number || ticket.id}</p>
           <StatusBadge value={ticket.status || "valid"} />
           <div className="qr-ticket-box">
             {ticket.qr_code_data_url ? (
@@ -1089,11 +1346,32 @@ export function AppExperience({
   function renderLogin() {
     return (
       <form className="auth-panel" onSubmit={(event) => void handleLogin(event)}>
-        <p className="eyebrow">Account</p>
-        <h2>Login</h2>
-        <input name="email" type="email" placeholder="email@example.com" required />
-        <input name="password" type="password" placeholder="Password" required />
-        <button className="primary-button" disabled={loading} type="submit">Login</button>
+        <p className="eyebrow">{APP_NAME}</p>
+        <h2>Sign In</h2>
+        <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>Sign in to your {APP_NAME} account</p>
+        <input
+          name="email"
+          type="email"
+          placeholder="Email address"
+          required
+          disabled={loading}
+        />
+        <input
+          name="password"
+          type="password"
+          placeholder="Password"
+          required
+          disabled={loading}
+        />
+        <button className="primary-button" disabled={loading} type="submit">
+          {loading ? "Signing in..." : "Sign In"}
+        </button>
+        <p style={{ marginTop: "16px", textAlign: "center", fontSize: "0.9rem" }}>
+          Don&apos;t have an account?{" "}
+          <Link href="/register" style={{ color: "var(--primary)", fontWeight: "600" }}>
+            Create one
+          </Link>
+        </p>
       </form>
     );
   }
@@ -1101,12 +1379,116 @@ export function AppExperience({
   function renderRegister() {
     return (
       <form className="auth-panel" onSubmit={(event) => void handleRegister(event)}>
-        <p className="eyebrow">Public self-register</p>
-        <h2>Create user account</h2>
-        <p>Public registration always creates a normal user account.</p>
-        <input name="email" type="email" placeholder="email@example.com" required />
-        <input name="password" type="password" placeholder="Password" required minLength={8} />
-        <button className="primary-button" disabled={loading} type="submit">Register</button>
+        <p className="eyebrow">{APP_NAME}</p>
+        <h2>Create Account</h2>
+        <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
+          Create your EZbook account to book events and manage your tickets.
+        </p>
+
+        <label className="field-label" htmlFor="register-full-name">
+          Full name
+        </label>
+        <input
+          id="register-full-name"
+          name="full_name"
+          type="text"
+          placeholder="Full name"
+          autoComplete="name"
+          required
+          disabled={loading}
+        />
+
+        <label className="field-label" htmlFor="register-email">
+          Email address
+        </label>
+        <input
+          id="register-email"
+          name="email"
+          type="email"
+          placeholder="Email address"
+          autoComplete="email"
+          required
+          disabled={loading}
+        />
+
+        <label className="field-label" htmlFor="register-phone">
+          Phone number
+        </label>
+        <input
+          id="register-phone"
+          name="phone"
+          type="tel"
+          placeholder="Phone number"
+          autoComplete="tel"
+          required
+          disabled={loading}
+        />
+
+        <label className="field-label" htmlFor="register-password">
+          Password
+        </label>
+        <input
+          id="register-password"
+          name="password"
+          type="password"
+          placeholder="Create a strong password"
+          autoComplete="new-password"
+          required
+          value={registerPassword}
+          onChange={(event) => setRegisterPassword(event.target.value)}
+          aria-describedby="password-rules"
+          disabled={loading}
+        />
+
+        <div id="password-rules" className="password-rules">
+          <p>Password must include:</p>
+          <ul>
+            {registerPasswordRules.map((rule) => {
+              const showError = registerAttempted && !rule.valid;
+
+              return (
+                <li
+                  key={rule.id}
+                  className={[
+                    "password-rule",
+                    rule.valid ? "valid" : "",
+                    showError ? "invalid" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                >
+                  <span aria-hidden="true">{rule.valid ? "âœ“" : "â€¢"}</span>
+                  {rule.label}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+
+        <label className="field-label" htmlFor="register-confirm-password">
+          Confirm password
+        </label>
+        <input
+          id="register-confirm-password"
+          name="confirm_password"
+          type="password"
+          placeholder="Re-enter the same password"
+          autoComplete="new-password"
+          required
+          value={registerConfirmPassword}
+          onChange={(event) => setRegisterConfirmPassword(event.target.value)}
+          disabled={loading}
+        />
+
+        <button className="primary-button" disabled={loading} type="submit">
+          {loading ? "Creating account..." : "Create Account"}
+        </button>
+        <p style={{ marginTop: "16px", textAlign: "center", fontSize: "0.9rem" }}>
+          Already have an account?{" "}
+          <Link href="/login" style={{ color: "var(--primary)", fontWeight: "600" }}>
+            Sign in
+          </Link>
+        </p>
       </form>
     );
   }
@@ -1131,7 +1513,7 @@ export function AppExperience({
               <div>
                 <h3>{notification.title}</h3>
                 <p>{notification.message}</p>
-                <small>{notification.type} · {formatDate(notification.created_at)}</small>
+                <small>{notification.type} Â· {formatDate(notification.created_at)}</small>
               </div>
               {!notification.is_read ? (
                 <button type="button" onClick={() => void markNotificationRead(notification.id)}>Mark read</button>
@@ -1207,11 +1589,18 @@ export function AppExperience({
 
     return (
       <section className="content-stack">
+        <div className="section-header">
+          <div>
+            <p className="eyebrow">Manual security dashboard</p>
+            <h2>Security logs</h2>
+          </div>
+          <button type="button" onClick={() => void loadSecurity()}>Refresh</button>
+        </div>
         <KpiGrid
           items={[
             ["Audit events", auditLogs.length],
             ["Suspicious", suspicious.length],
-            ["Security role", isSecurity ? "active" : "demo"],
+            ["Security role", isSecurity ? "active" : "inactive"],
             ["Unread alerts", unreadCount]
           ]}
         />
@@ -1230,7 +1619,6 @@ export function AppExperience({
             <h2>Monitoring</h2>
           </div>
           <div className="button-row">
-            <button type="button" onClick={() => void apiRequest("/monitoring/checks/run", { method: "POST" }).then(loadMonitoring)}>Run check</button>
             <button type="button" onClick={() => void loadMonitoring()}>Refresh</button>
           </div>
         </div>
@@ -1247,7 +1635,7 @@ export function AppExperience({
             <article className="ticket-row" key={incident.id}>
               <div>
                 <h3>{incident.service_name}</h3>
-                <p>{incident.incident_type} · {incident.summary}</p>
+                <p>{incident.incident_type} Â· {incident.summary}</p>
               </div>
               <StatusBadge value={incident.severity} />
               <div className="button-row">
@@ -1269,10 +1657,10 @@ export function AppExperience({
       <section className="content-stack">
         <KpiGrid
           items={[
-            ["Role", user ? roleLabels[user.role] || user.role : "Not logged in"],
+            ["Role", user ? getRoleLabel(user.role) : "Not logged in"],
             ["Gate events", staffEvents.length],
             ["Staff status", user?.staff_status || "unknown"],
-            ["Gate access", isGateStaff ? "enabled" : "not gate staff"]
+            ["Gate access", userRole === "security" ? "enabled" : "not staff role"]
           ]}
         />
         <div className="button-row">
@@ -1357,7 +1745,7 @@ export function AppExperience({
 
 function titleForView(view: ViewName) {
   const titles: Record<ViewName, string> = {
-    home: "Secure Tickets",
+    home: APP_NAME,
     events: "Events",
     "event-detail": "Event Details",
     login: "Login",
@@ -1474,3 +1862,4 @@ function formatCellValue(value: unknown) {
 
   return String(value);
 }
+
